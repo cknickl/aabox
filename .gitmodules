@@ -1,0 +1,9 @@
+[submodule "references/aa-proxy-rs"]
+	path = references/aa-proxy-rs
+	url = https://github.com/manio/aa-proxy-rs.git
+[submodule "references/aasdk"]
+	path = references/aasdk
+	url = https://github.com/f1xpl/aasdk.git
+[submodule "references/openauto"]
+	path = references/openauto
+	url = https://github.com/f1xpl/openauto.git

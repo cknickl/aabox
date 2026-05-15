@@ -8,7 +8,7 @@ pub fn version() -> &'static str {
 
 #[cfg(target_os = "android")]
 mod jni_bridge {
-    use jni::objects::{JClass, JString};
+    use jni::objects::JClass;
     use jni::sys::jstring;
     use jni::JNIEnv;
 
@@ -16,7 +16,7 @@ mod jni_bridge {
     /// Kotlin: `external fun nativeVersion(): String`
     #[no_mangle]
     pub extern "system" fn Java_app_aabox_aapd_NativeBridge_nativeVersion<'l>(
-        mut env: JNIEnv<'l>,
+        env: JNIEnv<'l>,
         _class: JClass<'l>,
     ) -> jstring {
         let v = super::version();

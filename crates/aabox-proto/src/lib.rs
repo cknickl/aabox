@@ -1,13 +1,36 @@
 //! AA Protocol message types.
 //!
-//! Generated from aasdk's `aasdk_proto/` directory at build time. Until the
-//! `references/aasdk` submodule is wired up, this crate is empty.
+//! Generated at build time from the .proto files in
+//! `references/aasdk/aasdk_proto/` (which has package `f1x.aasdk.proto`).
+//!
+//! Use the convenience re-exports under the crate root, e.g.:
+//!
+//! ```ignore
+//! use aabox_proto::enums::ChannelId;
+//! use aabox_proto::messages::ServiceDiscoveryResponse;
+//! ```
+//!
+//! The full path `aabox_proto::f1x::aasdk::proto::*` also works.
 
-// The build script writes generated modules into $OUT_DIR. Each .proto package
-// becomes a Rust module. We re-export them under their original names so callers
-// can `use aabox_proto::tag::Tag` etc. once protos are wired.
-//
-// Example after wiring:
-//   pub mod tag { include!(concat!(env!("OUT_DIR"), "/tag.rs")); }
-//
-// Add per-package re-exports here as the submodule lands.
+#[allow(clippy::all, clippy::pedantic, non_snake_case, non_camel_case_types)]
+pub mod f1x {
+    pub mod aasdk {
+        pub mod proto {
+            pub mod data {
+                include!(concat!(env!("OUT_DIR"), "/f1x.aasdk.proto.data.rs"));
+            }
+            pub mod enums {
+                include!(concat!(env!("OUT_DIR"), "/f1x.aasdk.proto.enums.rs"));
+            }
+            pub mod ids {
+                include!(concat!(env!("OUT_DIR"), "/f1x.aasdk.proto.ids.rs"));
+            }
+            pub mod messages {
+                include!(concat!(env!("OUT_DIR"), "/f1x.aasdk.proto.messages.rs"));
+            }
+        }
+    }
+}
+
+// Convenience re-exports
+pub use f1x::aasdk::proto::{data, enums, ids, messages};

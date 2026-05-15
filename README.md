@@ -48,13 +48,30 @@ aabox/
 
 Parallel: on-device CarCar re-signer service. Shares scaffolding with the daemon. ~3-4 days marginal effort once the daemon's project tax is paid.
 
-## Build (desktop / Linux)
+## Build
+
+**Host (Linux x86_64 dev box)**:
 
 ```bash
 cargo build --workspace
+cargo test  --workspace   # runs the prost-roundtrip smoke test
 ```
 
-For Android targets, see `docs/android-build.md` (TODO).
+**Android (aarch64-linux-android, API 33+)**:
+
+```bash
+# One-time: install cross-compile bits
+rustup target add aarch64-linux-android
+cargo install cargo-ndk
+# Set ANDROID_NDK_HOME=/path/to/ndk (r27+)
+
+./tools/build-android.sh
+# → target/aarch64-linux-android/debug/aabox-aapd  (binary)
+# → target/aarch64-linux-android/debug/libaabox_aapd.so  (cdylib for JNI)
+# (and same pair for aabox-resigner)
+```
+
+The build script honors `ANDROID_PLATFORM` (default 33), `ANDROID_ABI` (default `arm64-v8a`), `BUILD_PROFILE` (default `debug`; set to `release` for stripped optimized builds).
 
 ## Legal / IP
 

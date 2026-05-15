@@ -2,14 +2,28 @@
 
 These are **references only** — do not link against them. The actual code lives in `../crates/`.
 
-To populate, run (from the repo root):
+Submodules already present (added 2026-05-15):
+
+- `aa-proxy-rs/` → https://github.com/manio/aa-proxy-rs.git
+- `aasdk/`      → https://github.com/f1xpl/aasdk.git
+- `openauto/`   → https://github.com/f1xpl/openauto.git
+
+After cloning, run:
 
 ```bash
-git submodule add https://github.com/manio/aa-proxy-rs.git references/aa-proxy-rs
-git submodule add https://github.com/f1xpl/aasdk.git           references/aasdk
-git submodule add https://github.com/f1xpl/openauto.git        references/openauto
-# milek7's notes — TODO: confirm exact repo URL before adding
+git submodule update --init --recursive
 ```
+
+### Milek7's AAP protocol notes (not in git)
+
+milek7 publishes notes as a static web page rather than a git repo:
+
+- https://milek7.pl/.stuff/galdocs/readme.md
+- https://milek7.pl/.stuff/galdocs/huig13_cache.html
+
+Their Wireshark dissector for AAP (`androidauto.lua`) is mentioned in those docs — useful when analyzing `captures/*.pcap`.
+
+If you want a local copy, mirror with `wget -mk -np milek7.pl/.stuff/galdocs/` into `references/milek7-galdocs/` (added to `.gitignore` so it's not committed).
 
 ## What each reference gives us
 
