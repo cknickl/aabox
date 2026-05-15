@@ -1,0 +1,33 @@
+[package]
+name = "aabox-aapd"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "AABox AAP source daemon — speaks AAP over USB gadget to the head unit."
+
+[[bin]]
+name = "aabox-aapd"
+path = "src/main.rs"
+
+[lib]
+# We also expose as a cdylib for the Android JNI bridge to load.
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+aabox-common = { path = "../aabox-common" }
+aabox-proto = { path = "../aabox-proto" }
+
+tokio.workspace = true
+prost.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+bytes.workspace = true
+clap.workspace = true
+
+# JNI only when targeting Android (NDK)
+[target.'cfg(target_os = "android")'.dependencies]
+jni.workspace = true

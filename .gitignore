@@ -1,0 +1,30 @@
+/target
+Cargo.lock.bak
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Android build artifacts
+*.apk
+*.aab
+*.dex
+android/build/
+android/.gradle/
+
+# Captures (Wireshark .pcap can be large; keep small reference ones in git)
+captures/*.pcap
+captures/*.pcapng
+captures/large/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Secrets — NEVER commit signing keys
+*.pk8
+*.x509.pem
+*.keystore
+*.jks
