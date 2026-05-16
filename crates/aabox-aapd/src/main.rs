@@ -65,7 +65,10 @@ fn usb_bringup() -> anyhow::Result<()> {
 }
 
 fn dhu_listen(bind: String) -> anyhow::Result<()> {
-    use aabox_aapd::{control, services, tls};
+    use aabox_aapd::{control, tls, tls_tunnel};
+    use rustls::pki_types::ServerName;
+    use rustls::ClientConnection;
+    use std::sync::Arc;
     use tokio::net::TcpListener;
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -75,42 +78,44 @@ fn dhu_listen(bind: String) -> anyhow::Result<()> {
         let (mut stream, peer) = listener.accept().await?;
         tracing::info!(?peer, "DHU connected");
 
-        // Empirically: DHU 2.0 SENDS VersionRequest first (msg_id 0x0001).
-        // We respond. (Earlier theory that "source initiates" was wrong — DHU
-        // is the active speaker, regardless of TCP-client role.)
+        // Step 1: plaintext version handshake. DHU sends VersionRequest, we
+        // respond with VersionResponse (6-byte form, no CONTROL flag bit).
         let (peer_major, peer_minor) = control::version_handshake_responder(&mut stream).await?;
         tracing::info!(peer_major, peer_minor, "version handshake complete");
 
-        // Smoke: build TLS config (proves cert load) — full TLS handshake
-        // over the AAP tunnel is the next Phase 3 deliverable.
-        let _tls_cfg = tls::build_client_config()?;
-        tracing::info!("rustls client config built (TLS-over-AAP next)");
+        // Step 2: TLS handshake. AAP source = TLS client; AAP head unit (DHU)
+        // = TLS server. Handshake bytes are tunneled through SslHandshake
+        // control frames on channel 0.
+        let cfg = tls::build_client_config()?;
+        let name: ServerName<'static> =
+            ServerName::try_from("android.car")?.to_owned();
+        let mut conn = ClientConnection::new(Arc::clone(&cfg), name)?;
+        tracing::info!("starting TLS handshake over AAP");
+        tls_tunnel::client_handshake(&mut stream, &mut conn).await?;
+        tracing::info!(
+            negotiated = ?conn.protocol_version(),
+            cipher = ?conn.negotiated_cipher_suite().map(|c| c.suite()),
+            "TLS handshake complete"
+        );
 
-        // Smoke: pre-encode the SDR so the next iteration just sends it.
-        let resp = services::minimal_response();
-        let bytes = services::encode_response(&resp);
-        tracing::info!(bytes = bytes.len(), "ServiceDiscoveryResponse pre-encoded");
-
-        // Keep the socket open AND consume whatever DHU sends next, with a
-        // 10s budget. The TLS-over-AAP handshake driver will replace this
-        // once we know exactly what DHU expects to come after version.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // Step 3 onwards (AuthComplete, ServiceDiscoveryRequest/Response,
+        // ChannelOpenRequests, sensor bootstrap, video channel) — next slab
+        // of work. For now keep reading frames and log them so we can see
+        // what DHU sends post-TLS.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                tracing::info!("10s capture window elapsed");
+                tracing::info!("post-TLS capture window elapsed");
                 break;
             }
             match tokio::time::timeout(remaining, control::read_frame(&mut stream)).await {
-                Ok(Ok(f)) => {
-                    tracing::info!(
-                        channel = f.channel_id,
-                        control = f.control,
-                        encrypted = f.encrypted,
-                        payload_len = f.payload.len(),
-                        "post-handshake frame from DHU (will be handled in next iteration)"
-                    );
-                }
+                Ok(Ok(f)) => tracing::info!(
+                    channel = f.channel_id,
+                    encrypted = f.encrypted,
+                    payload_len = f.payload.len(),
+                    "post-TLS frame from DHU"
+                ),
                 Ok(Err(e)) => {
                     tracing::info!("DHU stream ended: {e:#}");
                     break;
