@@ -46,18 +46,30 @@ where
     if resp.channel_id != ChannelId::Control as u8 {
         bail!("expected control channel, got {}", resp.channel_id);
     }
-    if resp.payload.len() < 8 {
-        bail!("VersionResponse payload too short: {}", resp.payload.len());
+    // DHU 2.0 (mac-arm64) sends a 6-byte VersionResponse: msg_id + major + minor,
+    // no status. Older aasdk-shaped head units send 8 bytes with a trailing u16
+    // status. Accept either.
+    if resp.payload.len() < 6 {
+        bail!("VersionResponse payload too short: {} (need >=6)", resp.payload.len());
     }
+    tracing::debug!(payload_hex = %hex_dump(&resp.payload), "VersionResponse raw payload");
     let msg_id = u16::from_be_bytes([resp.payload[0], resp.payload[1]]);
     if msg_id != ControlMessageId::VersionResponse as u16 {
         bail!("expected VersionResponse (0x0002), got 0x{:04x}", msg_id);
     }
     let major = u16::from_be_bytes([resp.payload[2], resp.payload[3]]);
     let minor = u16::from_be_bytes([resp.payload[4], resp.payload[5]]);
-    let status = u16::from_be_bytes([resp.payload[6], resp.payload[7]]);
+    let status = if resp.payload.len() >= 8 {
+        u16::from_be_bytes([resp.payload[6], resp.payload[7]])
+    } else {
+        0 // implicit OK when DHU omits the field
+    };
     tracing::info!(major, minor, status, "VersionResponse received");
     Ok((major, minor, status))
+}
+
+fn hex_dump(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
 }
 
 /// Perform the plaintext version handshake — RESPONDER side (source role,
