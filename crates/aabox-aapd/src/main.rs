@@ -66,8 +66,7 @@ fn usb_bringup() -> anyhow::Result<()> {
 
 fn dhu_listen(bind: String) -> anyhow::Result<()> {
     use aabox_aapd::{control, tls, tls_tunnel};
-    use rustls::pki_types::ServerName;
-    use rustls::ClientConnection;
+    use rustls::ServerConnection;
     use std::sync::Arc;
     use tokio::net::TcpListener;
 
@@ -83,15 +82,15 @@ fn dhu_listen(bind: String) -> anyhow::Result<()> {
         let (peer_major, peer_minor) = control::version_handshake_responder(&mut stream).await?;
         tracing::info!(peer_major, peer_minor, "version handshake complete");
 
-        // Step 2: TLS handshake. AAP source = TLS client; AAP head unit (DHU)
-        // = TLS server. Handshake bytes are tunneled through SslHandshake
-        // control frames on channel 0.
-        let cfg = tls::build_client_config()?;
-        let name: ServerName<'static> =
-            ServerName::try_from("android.car")?.to_owned();
-        let mut conn = ClientConnection::new(Arc::clone(&cfg), name)?;
-        tracing::info!("starting TLS handshake over AAP");
-        tls_tunnel::client_handshake(&mut stream, &mut conn).await?;
+        // Step 2: TLS handshake. Empirically (per DHU's BoringSSL log
+        // "TLS client read_server_hello"), the AAP head unit is the TLS
+        // CLIENT, and the source (us) is the TLS SERVER. aasdk's Cryptor
+        // calls setConnectState() — but aasdk targets the HU role, which
+        // confirms HU = TLS client. We use ServerConnection here.
+        let cfg = tls::build_server_config()?;
+        let mut conn = ServerConnection::new(Arc::clone(&cfg))?;
+        tracing::info!("starting TLS handshake over AAP (we are TLS server)");
+        tls_tunnel::server_handshake(&mut stream, &mut conn).await?;
         tracing::info!(
             negotiated = ?conn.protocol_version(),
             cipher = ?conn.negotiated_cipher_suite().map(|c| c.suite()),

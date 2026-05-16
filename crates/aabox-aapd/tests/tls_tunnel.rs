@@ -13,7 +13,7 @@ async fn tls_over_aap_handshake_round_trip() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_addr = listener.local_addr().unwrap();
 
-    let server_cfg = tls::build_test_server_config().expect("server cfg");
+    let server_cfg = tls::build_server_config().expect("server cfg");
     let client_cfg = tls::build_client_config().expect("client cfg");
 
     let server = tokio::spawn(async move {

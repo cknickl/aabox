@@ -64,10 +64,13 @@ fn key_into_der(key: PrivateKeyDer<'static>) -> PrivateKeyDer<'static> {
     key
 }
 
-/// Test-only: build a ServerConfig using the same embedded cert+key. Used by
-/// the in-process fake head unit in our integration tests so we can self-test
-/// the full TLS-over-AAP handshake.
-pub fn build_test_server_config() -> Result<Arc<ServerConfig>> {
+/// Build a ServerConfig using the embedded JVC Kenwood headunit cert+key.
+///
+/// In AAP the head unit (car / DHU) is the TLS *client* and the source (us)
+/// is the TLS *server* — empirically confirmed against DHU 2.0 whose
+/// BoringSSL log says `TLS client read_server_hello`. So this is our
+/// production-path config, not just a test fixture.
+pub fn build_server_config() -> Result<Arc<ServerConfig>> {
     let provider = rustls::crypto::ring::default_provider();
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::Cursor::new(
         HEADUNIT_CRT,
