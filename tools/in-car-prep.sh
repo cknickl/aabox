@@ -37,12 +37,18 @@ echo "[in-car-prep] clearing previous logs..."
 "${A[@]}" shell "rm -f /data/local/tmp/aabox-aapd.log /data/local/tmp/aabox-aapd.status"
 
 echo "[in-car-prep] killing any running daemon..."
-"${A[@]}" shell "pkill -f aabox-aapd 2>/dev/null; pkill -f aabox-aapd-watchdog 2>/dev/null; true"
+# Don't fail if no match; toybox pkill on Android can hang waiting for a TTY
+# if we don't redirect stdin. The two-stage form (test then pkill) avoids
+# pkill's exit-1-on-no-match returning a stuck adb session.
+"${A[@]}" shell "pidof aabox-aapd && pkill -9 -f aabox-aapd; pidof aabox-aapd-watchdog && pkill -9 -f aabox-aapd-watchdog; true" >/dev/null 2>&1 || true
 
-echo "[in-car-prep] starting watchdog (which starts the daemon and respawns it on crash)..."
-"${A[@]}" shell "nohup /data/local/tmp/aabox-aapd-watchdog.sh > /data/local/tmp/watchdog.log 2>&1 < /dev/null &"
+echo "[in-car-prep] starting watchdog under setsid (fully detached)..."
+# setsid + redirect all three FDs + & is the only reliable detach pattern
+# across adb shell sessions on Android (nohup alone isn't enough — adb's
+# shell waits for child processes even with &).
+"${A[@]}" shell "setsid sh /data/local/tmp/aabox-aapd-watchdog.sh > /data/local/tmp/watchdog.log 2>&1 < /dev/null &"
 
-sleep 1
+sleep 2
 
 echo
 echo "[in-car-prep] OK. Current daemon status:"
