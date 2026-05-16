@@ -13,7 +13,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::ClientConfig;
+use rustls::{ClientConfig, ServerConfig};
 use std::sync::Arc;
 
 const HEADUNIT_CRT: &[u8] = include_bytes!("../embedded-certs/headunit.crt");
@@ -62,6 +62,29 @@ pub fn build_client_config() -> Result<Arc<ClientConfig>> {
 
 fn key_into_der(key: PrivateKeyDer<'static>) -> PrivateKeyDer<'static> {
     key
+}
+
+/// Test-only: build a ServerConfig using the same embedded cert+key. Used by
+/// the in-process fake head unit in our integration tests so we can self-test
+/// the full TLS-over-AAP handshake.
+pub fn build_test_server_config() -> Result<Arc<ServerConfig>> {
+    let provider = rustls::crypto::ring::default_provider();
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::Cursor::new(
+        HEADUNIT_CRT,
+    ))
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .context("parse headunit cert (server)")?;
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(HEADUNIT_KEY))
+        .context("parse headunit key (server)")?
+        .ok_or_else(|| anyhow!("no private key (server)"))?;
+
+    let cfg = ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS12])
+        .context("server protocol_versions")?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("server with_single_cert")?;
+    Ok(Arc::new(cfg))
 }
 
 /// Custom server-cert verifier: accept anything. AAP doesn't use server-cert

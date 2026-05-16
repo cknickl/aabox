@@ -6,6 +6,7 @@ pub mod control;
 pub mod framing;
 pub mod services;
 pub mod tls;
+pub mod tls_tunnel;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod usb;
