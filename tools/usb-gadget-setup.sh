@@ -1,34 +1,38 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # AABox USB gadget bring-up: creates the 'default' and 'accessory' ConfigFS
 # gadgets used by aabox-aapd. Run once at boot (init.rc on Android, systemd
 # on plain Linux) BEFORE the daemon starts.
 #
-# The gadgets are created in a "disabled" state (UDC not bound). aabox-aapd
-# flips them on/off via the UDC file at runtime.
+# Gadgets are created in a "disabled" state (UDC not bound). aabox-aapd flips
+# them on/off via the UDC file at runtime.
 #
-# Requires:
-#   - Kernel built with CONFIG_USB_F_ACCESSORY=y (or =m, modprobed first)
-#   - Kernel built with CONFIG_USB_CONFIGFS=y + CONFIG_USB_CONFIGFS_F_ACC=y
-#   - Kernel built with CONFIG_USB_CONFIGFS_SERIAL=y (for the 'default' gadget's
-#     ACM function — change function below if your kernel uses MTP or mass-storage)
-#   - configfs mounted at /sys/kernel/config (Android init.rc usually does this)
-#   - root (this script must be run as root)
-set -euo pipefail
+# Requirements: root + a UDC visible under /sys/class/udc + configfs mounted.
+set -e
 
-CONFIGFS=/sys/kernel/config/usb_gadget
-[[ -d "$CONFIGFS" ]] || { echo "ERROR: $CONFIGFS missing — is configfs mounted? is the kernel built with CONFIG_USB_CONFIGFS?"; exit 1; }
-[[ $EUID -eq 0 ]] || { echo "ERROR: must run as root"; exit 1; }
+# Auto-detect configfs root (Android = /config, plain Linux = /sys/kernel/config).
+for c in /config/usb_gadget /sys/kernel/config/usb_gadget; do
+    if [ -d "$c" ]; then
+        CONFIGFS="$c"
+        break
+    fi
+done
+if [ -z "$CONFIGFS" ]; then
+    echo "ERROR: no usb_gadget configfs directory found"
+    exit 1
+fi
+echo "Using configfs root: $CONFIGFS"
+
+# Must be root (Android has $USER unset, so check id instead).
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: must run as root"
+    exit 1
+fi
 
 # ---- 'default' gadget: minimal Android-phone-shaped USB device ---------------
-#
-# The car (AOAv2 host) tries ACCESSORY_GET_PROTOCOL on any USB device. We need
-# to be enumerable as a regular USB device so the car gets that far. We use
-# ACM (serial) here because it's the smallest useful default. Mass-storage or
-# MTP would also work; pick whatever your kernel config has.
 mkdir -p "$CONFIGFS/default"
 cd "$CONFIGFS/default"
 echo 0x18D1 > idVendor                   # Google
-echo 0x4E11 > idProduct                  # Generic Android device-ish
+echo 0x4E11 > idProduct                  # Generic Android-ish
 echo 0x0100 > bcdDevice
 echo 0x0200 > bcdUSB
 mkdir -p strings/0x409
@@ -39,9 +43,9 @@ mkdir -p configs/c.1/strings/0x409
 echo "AABox default config" > configs/c.1/strings/0x409/configuration
 echo 250 > configs/c.1/MaxPower
 mkdir -p functions/acm.gs0
-# Link function into config (idempotent — symlink may already exist)
-[[ -L configs/c.1/acm.gs0 ]] || ln -s functions/acm.gs0 configs/c.1/acm.gs0
-# Leave UDC unbound — aabox-aapd will write it at runtime.
+if [ ! -L configs/c.1/acm.gs0 ]; then
+    ln -s functions/acm.gs0 configs/c.1/acm.gs0
+fi
 
 # ---- 'accessory' gadget: VID/PID 0x18D1:0x2D00 + f_accessory function -------
 mkdir -p "$CONFIGFS/accessory"
@@ -58,8 +62,9 @@ mkdir -p configs/c.1/strings/0x409
 echo "AABox accessory config" > configs/c.1/strings/0x409/configuration
 echo 250 > configs/c.1/MaxPower
 mkdir -p functions/accessory.gs0
-[[ -L configs/c.1/accessory.gs0 ]] || ln -s functions/accessory.gs0 configs/c.1/accessory.gs0
-# Leave UDC unbound — aabox-aapd flips this when ACCESSORY=START arrives.
+if [ ! -L configs/c.1/accessory.gs0 ]; then
+    ln -s functions/accessory.gs0 configs/c.1/accessory.gs0
+fi
 
-echo "[usb-gadget-setup] OK — gadgets staged under $CONFIGFS. Available UDCs:"
-ls /sys/class/udc
+echo "[usb-gadget-setup] OK — gadgets staged under $CONFIGFS"
+echo "[usb-gadget-setup] Available UDCs: $(ls /sys/class/udc 2>/dev/null)"

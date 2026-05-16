@@ -14,8 +14,26 @@ use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const CONFIGFS_ROOT: &str = "/sys/kernel/config/usb_gadget";
+/// Candidate configfs roots, ordered by preference. Android mounts configfs at
+/// `/config` directly; generic Linux distros mount it at `/sys/kernel/config`.
+pub const CONFIGFS_CANDIDATES: &[&str] = &[
+    "/config/usb_gadget",
+    "/sys/kernel/config/usb_gadget",
+];
 pub const UDC_DIR: &str = "/sys/class/udc";
+
+fn discover_configfs() -> Result<PathBuf> {
+    for c in CONFIGFS_CANDIDATES {
+        let p = Path::new(c);
+        if p.exists() {
+            return Ok(p.to_path_buf());
+        }
+    }
+    Err(anyhow!(
+        "no configfs usb_gadget directory found (tried: {:?})",
+        CONFIGFS_CANDIDATES
+    ))
+}
 
 pub struct UsbGadgetState {
     configfs: PathBuf,
@@ -23,8 +41,10 @@ pub struct UsbGadgetState {
 }
 
 impl UsbGadgetState {
-    /// Auto-detect the UDC (the kernel only exposes one on the CM5 IO board).
+    /// Auto-detect both the configfs root and the UDC.
     pub fn autodetect() -> Result<Self> {
+        let configfs = discover_configfs()?;
+        tracing::info!(path = %configfs.display(), "configfs root");
         let entries = fs::read_dir(UDC_DIR)
             .with_context(|| format!("read_dir({UDC_DIR})"))?;
         let first = entries
@@ -37,17 +57,18 @@ impl UsbGadgetState {
             .map_err(|_| anyhow!("UDC name is not valid UTF-8"))?;
         tracing::info!(udc = %udc_name, "autodetected UDC");
         Ok(Self {
-            configfs: PathBuf::from(CONFIGFS_ROOT),
+            configfs,
             udc_name,
         })
     }
 
     /// Explicit UDC name (use for testing or when multiple controllers exist).
-    pub fn with_udc(udc_name: impl Into<String>) -> Self {
-        Self {
-            configfs: PathBuf::from(CONFIGFS_ROOT),
+    /// configfs root still auto-detected.
+    pub fn with_udc(udc_name: impl Into<String>) -> Result<Self> {
+        Ok(Self {
+            configfs: discover_configfs()?,
             udc_name: udc_name.into(),
-        }
+        })
     }
 
     /// Enable a gadget by name (binds it to the UDC).

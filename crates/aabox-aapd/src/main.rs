@@ -15,11 +15,13 @@ enum Cmd {
     /// Linux/Android only — needs root + ConfigFS + f_accessory kernel driver.
     UsbBringup,
 
-    /// Connect to a Desktop Head Unit over TCP and run the AAP handshake.
-    /// DHU listens on 5277 by default.
-    Dhu {
+    /// Listen for an incoming DHU (Desktop Head Unit) connection and play the
+    /// AAP *source* role: read VersionRequest, reply with VersionResponse,
+    /// build TLS config. Default bind 127.0.0.1:5277 to match DHU's expected
+    /// "Head Unit Server" address.
+    DhuListen {
         #[arg(default_value = "127.0.0.1:5277")]
-        addr: String,
+        bind: String,
     },
 }
 
@@ -36,9 +38,9 @@ fn main() -> anyhow::Result<()> {
 
     match args.cmd {
         Some(Cmd::UsbBringup) => usb_bringup(),
-        Some(Cmd::Dhu { addr }) => dhu_connect(addr),
+        Some(Cmd::DhuListen { bind }) => dhu_listen(bind),
         None => {
-            eprintln!("usage: aabox-aapd <usb-bringup|dhu [addr]>");
+            eprintln!("usage: aabox-aapd <usb-bringup|dhu-listen [bind]>");
             std::process::exit(2);
         }
     }
@@ -49,10 +51,10 @@ fn usb_bringup() -> anyhow::Result<()> {
     use aabox_aapd::usb;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let mut state = usb::gadget::UsbGadgetState::autodetect()?;
-        usb::bring_up(&mut state).await?;
-        let fd = usb::stream::open()?;
-        tracing::info!(?fd, "accessory device opened — ready for AAP framing (Phase 3)");
+        let fd = usb::wait_for_accessory().await?;
+        tracing::info!(?fd, "accessory device opened — Phase 3 AAP framing comes next");
+        // TODO Phase 3: wrap fd in an AsyncRead+AsyncWrite, run version_handshake_responder,
+        // run TLS-over-AAP handshake, dispatch channels.
         Ok(())
     })
 }
@@ -62,31 +64,33 @@ fn usb_bringup() -> anyhow::Result<()> {
     anyhow::bail!("usb-bringup is only supported on Linux/Android targets")
 }
 
-fn dhu_connect(addr: String) -> anyhow::Result<()> {
+fn dhu_listen(bind: String) -> anyhow::Result<()> {
     use aabox_aapd::{control, services, tls};
-    use tokio::net::TcpStream;
+    use tokio::net::TcpListener;
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        tracing::info!(%addr, "connecting to DHU");
-        let mut stream = TcpStream::connect(&addr).await?;
-        tracing::info!("connected; running version handshake");
+        tracing::info!(%bind, "listening for incoming DHU connection (source role)");
+        let listener = TcpListener::bind(&bind).await?;
+        let (mut stream, peer) = listener.accept().await?;
+        tracing::info!(?peer, "DHU connected");
 
-        let (major, minor, status) = control::version_handshake(&mut stream).await?;
-        tracing::info!(major, minor, status, "version negotiated");
+        let (peer_major, peer_minor) = control::version_handshake_responder(&mut stream).await?;
+        tracing::info!(peer_major, peer_minor, "version handshake complete");
 
-        // Smoke: build the rustls client config (proves cert+key load). Wiring
-        // the actual TLS tunnel over AAP frames is the next slab of Phase 3
-        // work — see docs/phase-3-aap.md.
+        // Smoke: build TLS config (proves cert load) — full TLS handshake
+        // over the AAP tunnel is the next Phase 3 deliverable.
         let _tls_cfg = tls::build_client_config()?;
-        tracing::info!("rustls client config built (TLS handshake tunnel pending)");
+        tracing::info!("rustls client config built (TLS-over-AAP next)");
 
-        // Smoke: build the ServiceDiscoveryResponse payload (proves protobuf
-        // schema lines up).
+        // Smoke: pre-encode the SDR so the next iteration just sends it.
         let resp = services::minimal_response();
         let bytes = services::encode_response(&resp);
-        tracing::info!(bytes = bytes.len(), "ServiceDiscoveryResponse encoded");
+        tracing::info!(bytes = bytes.len(), "ServiceDiscoveryResponse pre-encoded");
 
+        // Keep the socket open briefly so DHU sees we're alive; in practice
+        // the next chunk of code (TLS handshake driver) will start here.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         Ok(())
     })
 }

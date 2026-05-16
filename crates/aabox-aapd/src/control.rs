@@ -16,14 +16,16 @@ use anyhow::{anyhow, bail, Context, Result};
 use bytes::{BufMut, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Major/minor version we advertise. aasdk has historically used 1.1.
+/// Major/minor version we advertise. DHU 2.0 (mac-arm64) announces 1.7;
+/// real cars in the wild speak 1.x with x = 1..7 typically.
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 1;
+pub const PROTOCOL_MINOR: u16 = 7;
 
-/// Perform the plaintext version handshake.
-/// Sends VersionRequest, waits for VersionResponse. Returns the peer's
-/// (major, minor, status) tuple.
-pub async fn version_handshake<S>(stream: &mut S) -> Result<(u16, u16, u16)>
+/// Perform the plaintext version handshake — INITIATOR side (head-unit role
+/// in AAP terms). Sends VersionRequest, waits for VersionResponse. Returns
+/// the peer's (major, minor, status) tuple. Used when we're acting as the
+/// car (e.g., the in-process fake head unit in our integration tests).
+pub async fn version_handshake_initiator<S>(stream: &mut S) -> Result<(u16, u16, u16)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -56,6 +58,46 @@ where
     let status = u16::from_be_bytes([resp.payload[6], resp.payload[7]]);
     tracing::info!(major, minor, status, "VersionResponse received");
     Ok((major, minor, status))
+}
+
+/// Perform the plaintext version handshake — RESPONDER side (source role,
+/// e.g., our daemon when DHU or a real car is the head unit). Reads
+/// VersionRequest, replies with VersionResponse. Returns the peer's
+/// (major, minor) advertised version.
+pub async fn version_handshake_responder<S>(stream: &mut S) -> Result<(u16, u16)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let req = read_frame(stream).await.context("read VersionRequest frame")?;
+    if req.channel_id != ChannelId::Control as u8 {
+        bail!("expected control channel, got {}", req.channel_id);
+    }
+    if req.payload.len() < 6 {
+        bail!("VersionRequest payload too short: {}", req.payload.len());
+    }
+    let msg_id = u16::from_be_bytes([req.payload[0], req.payload[1]]);
+    if msg_id != ControlMessageId::VersionRequest as u16 {
+        bail!("expected VersionRequest (0x0001), got 0x{:04x}", msg_id);
+    }
+    let peer_major = u16::from_be_bytes([req.payload[2], req.payload[3]]);
+    let peer_minor = u16::from_be_bytes([req.payload[4], req.payload[5]]);
+    tracing::info!(peer_major, peer_minor, "VersionRequest received");
+
+    // Reply with our own version + status=0 (OK). aasdk's status enum:
+    //   0 = OK, 1 = MISMATCH. Most cars treat any minor diff as compatible.
+    let mut body = BytesMut::with_capacity(6);
+    body.put_u16(PROTOCOL_MAJOR);
+    body.put_u16(PROTOCOL_MINOR);
+    body.put_u16(0);
+
+    let resp = Frame::bulk_control(
+        ChannelId::Control as u8,
+        ControlMessageId::VersionResponse as u16,
+        &body,
+    );
+    write_frame(stream, &resp).await.context("write VersionResponse")?;
+    tracing::info!(major = PROTOCOL_MAJOR, minor = PROTOCOL_MINOR, "VersionResponse sent");
+    Ok((peer_major, peer_minor))
 }
 
 /// Write one frame to an async stream.

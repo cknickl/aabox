@@ -45,10 +45,50 @@ async fn version_handshake_against_fake_head_unit() {
 
     // Client side: connect and run the handshake.
     let mut client = TcpStream::connect(local_addr).await.unwrap();
-    let (major, minor, status) = control::version_handshake(&mut client).await.unwrap();
+    let (major, minor, status) = control::version_handshake_initiator(&mut client).await.unwrap();
     assert_eq!(major, control::PROTOCOL_MAJOR);
     assert_eq!(minor, control::PROTOCOL_MINOR);
     assert_eq!(status, 0);
 
     server.await.unwrap();
+}
+
+/// Inverse direction — proves our `version_handshake_responder` works
+/// against an *external* initiator (the role DHU plays). The "head unit"
+/// here is the test driver itself; the responder is what `dhu-listen` runs.
+#[tokio::test]
+async fn version_handshake_responder_accepts_external_initiator() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    // Daemon side: listen + run responder.
+    let daemon = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let (peer_major, peer_minor) = control::version_handshake_responder(&mut sock).await.unwrap();
+        assert_eq!(peer_major, control::PROTOCOL_MAJOR);
+        assert_eq!(peer_minor, control::PROTOCOL_MINOR);
+    });
+
+    // Head unit (test driver): connect and send VersionRequest, expect VersionResponse.
+    let mut hu = TcpStream::connect(local_addr).await.unwrap();
+    let mut body = BytesMut::with_capacity(4);
+    body.put_u16(control::PROTOCOL_MAJOR);
+    body.put_u16(control::PROTOCOL_MINOR);
+    let req = Frame::bulk_control(
+        ChannelId::Control as u8,
+        ControlMessageId::VersionRequest as u16,
+        &body,
+    );
+    hu.write_all(&req.encode()).await.unwrap();
+    hu.flush().await.unwrap();
+
+    let resp = control::read_frame(&mut hu).await.unwrap();
+    assert_eq!(resp.channel_id, ChannelId::Control as u8);
+    let msg_id = u16::from_be_bytes([resp.payload[0], resp.payload[1]]);
+    assert_eq!(msg_id, ControlMessageId::VersionResponse as u16);
+    let major = u16::from_be_bytes([resp.payload[2], resp.payload[3]]);
+    let minor = u16::from_be_bytes([resp.payload[4], resp.payload[5]]);
+    assert_eq!((major, minor), (control::PROTOCOL_MAJOR, control::PROTOCOL_MINOR));
+
+    daemon.await.unwrap();
 }
