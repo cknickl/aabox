@@ -3,6 +3,7 @@
 //! The Android service-wrapper loads this as a cdylib over JNI.
 
 pub mod control;
+pub mod encrypted;
 pub mod framing;
 pub mod services;
 pub mod tls;
