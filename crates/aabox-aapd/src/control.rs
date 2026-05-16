@@ -121,6 +121,11 @@ where
     S: tokio::io::AsyncWrite + Unpin,
 {
     let bytes = frame.encode();
+    tracing::debug!(
+        n = bytes.len(),
+        wire = %hex_dump(&bytes),
+        "TX frame wire bytes"
+    );
     stream.write_all(&bytes).await.context("write frame")?;
     stream.flush().await.context("flush frame")?;
     Ok(())
@@ -135,6 +140,10 @@ where
 {
     let mut header = [0u8; 4];
     stream.read_exact(&mut header).await.context("read frame header")?;
+    tracing::debug!(
+        header = %hex_dump(&header),
+        "RX frame header"
+    );
     let channel_id = header[0];
     let flags = header[1];
     let payload_len = u16::from_be_bytes([header[2], header[3]]) as usize;
@@ -156,6 +165,11 @@ where
 
     let mut payload = vec![0u8; payload_len];
     stream.read_exact(&mut payload).await.context("read frame payload")?;
+    tracing::debug!(
+        n = payload.len(),
+        payload = %hex_dump(&payload),
+        "RX frame payload"
+    );
 
     Ok(Frame {
         channel_id,

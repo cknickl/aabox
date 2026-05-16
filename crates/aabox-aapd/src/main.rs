@@ -91,9 +91,36 @@ fn dhu_listen(bind: String) -> anyhow::Result<()> {
         let bytes = services::encode_response(&resp);
         tracing::info!(bytes = bytes.len(), "ServiceDiscoveryResponse pre-encoded");
 
-        // Keep the socket open briefly so DHU sees we're alive; in practice
-        // the next chunk of code (TLS handshake driver) will start here.
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // Keep the socket open AND consume whatever DHU sends next, with a
+        // 10s budget. The TLS-over-AAP handshake driver will replace this
+        // once we know exactly what DHU expects to come after version.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                tracing::info!("10s capture window elapsed");
+                break;
+            }
+            match tokio::time::timeout(remaining, control::read_frame(&mut stream)).await {
+                Ok(Ok(f)) => {
+                    tracing::info!(
+                        channel = f.channel_id,
+                        control = f.control,
+                        encrypted = f.encrypted,
+                        payload_len = f.payload.len(),
+                        "post-handshake frame from DHU (will be handled in next iteration)"
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::info!("DHU stream ended: {e:#}");
+                    break;
+                }
+                Err(_) => {
+                    tracing::info!("capture window timed out");
+                    break;
+                }
+            }
+        }
         Ok(())
     })
 }
