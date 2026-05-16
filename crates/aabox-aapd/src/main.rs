@@ -82,12 +82,15 @@ fn dhu_listen(bind: String) -> anyhow::Result<()> {
         let (peer_major, peer_minor) = control::version_handshake_responder(&mut stream).await?;
         tracing::info!(peer_major, peer_minor, "version handshake complete");
 
-        // Step 2: TLS handshake. Per milek7's HUIG13 notes (verbatim): "TLS
-        // 1.2 with Client Authentication... the head unit (TLS Client) and
-        // mobile device (TLS Server)". So we are TLS server with mutual TLS
-        // (request HU's cert, accept any since we don't have Google's CA).
-        // DHU's BoringSSL "TLS client read_server_hello UNEXPECTED_MESSAGE"
-        // earlier was DHU complaining our role was inverted, not its own.
+        // Step 2: TLS handshake. Per milek7's HUIG13: HU = TLS client, MD = TLS
+        // server, mutual TLS. But when we set up as server and wait for
+        // ClientHello, DHU never sends one — it appears to need a kickoff
+        // probe from us first. Send an empty SslHandshake frame to nudge
+        // DHU's TLS state machine into emitting its ClientHello.
+        let probe = control::ssl_handshake_frame(b"");
+        tracing::info!("sending SslHandshake kickoff probe");
+        control::write_frame(&mut stream, &probe).await?;
+
         let cfg = tls::build_server_config()?;
         let mut conn = rustls::ServerConnection::new(Arc::clone(&cfg))?;
         tracing::info!("starting TLS handshake over AAP (we are TLS server, mTLS)");
