@@ -24,8 +24,10 @@ prost-types = "0.13"
 prost-build = "0.13"
 
 # TLS for the AA SSL handshake — pure-Rust, no OpenSSL dependency on Android
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+# Using ring as the crypto provider (lighter cross-compile than aws-lc-rs).
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring"] }
 
 # Errors / logging
 anyhow = "1"

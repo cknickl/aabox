@@ -2,6 +2,11 @@
 //!
 //! The Android service-wrapper loads this as a cdylib over JNI.
 
+pub mod control;
+pub mod framing;
+pub mod services;
+pub mod tls;
+
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod usb;
 
