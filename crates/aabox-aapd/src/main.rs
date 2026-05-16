@@ -82,20 +82,18 @@ fn dhu_listen(bind: String) -> anyhow::Result<()> {
         let (peer_major, peer_minor) = control::version_handshake_responder(&mut stream).await?;
         tracing::info!(peer_major, peer_minor, "version handshake complete");
 
-        // Step 2: TLS handshake. After multiple iterations: with CONTROL flag
-        // bit fixed, DHU's UI reaches "waiting for phone" (connection alive)
-        // and is *silent*, meaning it expects the source to drive TLS. Source
-        // = TLS client; head unit (DHU) = TLS server. The earlier "TLS client
-        // read_server_hello UNEXPECTED_MESSAGE" was a side-effect of the
-        // 0x07 flag-byte frame corruption, not a role issue.
-        let cfg = tls::build_client_config()?;
-        let name: rustls::pki_types::ServerName<'static> =
-            rustls::pki_types::ServerName::try_from("android.car")?.to_owned();
-        let mut conn = rustls::ClientConnection::new(Arc::clone(&cfg), name)?;
-        tracing::info!("starting TLS handshake over AAP (we are TLS client)");
+        // Step 2: TLS handshake. Per milek7's HUIG13 notes (verbatim): "TLS
+        // 1.2 with Client Authentication... the head unit (TLS Client) and
+        // mobile device (TLS Server)". So we are TLS server with mutual TLS
+        // (request HU's cert, accept any since we don't have Google's CA).
+        // DHU's BoringSSL "TLS client read_server_hello UNEXPECTED_MESSAGE"
+        // earlier was DHU complaining our role was inverted, not its own.
+        let cfg = tls::build_server_config()?;
+        let mut conn = rustls::ServerConnection::new(Arc::clone(&cfg))?;
+        tracing::info!("starting TLS handshake over AAP (we are TLS server, mTLS)");
         tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            tls_tunnel::client_handshake(&mut stream, &mut conn),
+            tls_tunnel::server_handshake(&mut stream, &mut conn),
         )
         .await
         .map_err(|_| anyhow::anyhow!("TLS handshake timed out after 15s"))??;
