@@ -1,0 +1,15 @@
+# Android init service definition for the AABox AAP daemon.
+# Goes to /system/etc/init/aabox-aapd.rc.
+#
+# Service launches the watchdog wrapper, which loops the daemon. Since we
+# don't set `oneshot`, init will also restart the watchdog itself if it ever
+# dies. Belt-and-suspenders restart logic.
+
+service aabox_aapd /system/bin/aabox-aapd-watchdog.sh
+    class main
+    user root
+    group root
+    seclabel u:r:su:s0
+
+on boot
+    start aabox_aapd
