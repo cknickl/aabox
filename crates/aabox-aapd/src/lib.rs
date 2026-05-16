@@ -2,6 +2,9 @@
 //!
 //! The Android service-wrapper loads this as a cdylib over JNI.
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod usb;
+
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

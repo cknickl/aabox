@@ -28,6 +28,12 @@ tracing-subscriber.workspace = true
 bytes.workspace = true
 clap.workspace = true
 
+# Linux + Android: USB gadget hot-swap via ConfigFS + netlink uevents
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+netlink-sys.workspace = true
+kobject-uevent.workspace = true
+nix.workspace = true
+
 # JNI only when targeting Android (NDK)
 [target.'cfg(target_os = "android")'.dependencies]
 jni.workspace = true

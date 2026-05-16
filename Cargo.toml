@@ -41,3 +41,10 @@ clap = { version = "4", features = ["derive"] }
 
 # Android JNI (used by aabox-aapd to expose interface to Kotlin/Java)
 jni = "0.21"
+
+# Linux/Android-only: netlink socket + uevent parsing for USB gadget hot-swap
+netlink-sys = "0.8"
+kobject-uevent = "0.1"
+
+# POSIX bits (file flags, ioctls) — used by the USB stream layer
+nix = { version = "0.29", features = ["fs", "ioctl"] }
