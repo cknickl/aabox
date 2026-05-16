@@ -134,6 +134,11 @@ impl Frame {
 
     /// Convenience: build a BULK control-channel frame (the shape of most
     /// handshake messages: VersionRequest, ServiceDiscoveryResponse, etc.).
+    ///
+    /// Empirically (DHU 2.0 wire capture): the `CONTROL` flag bit (0x04) is
+    /// NOT set on real wire frames — DHU rejects a `0x07` flag byte even
+    /// though aasdk's MessageType::CONTROL enum value says it should be there.
+    /// We mirror DHU's encoding and leave `control: false`.
     pub fn bulk_control(channel_id: u8, message_id: u16, body: &[u8]) -> Frame {
         let mut payload = BytesMut::with_capacity(2 + body.len());
         payload.put_u16(message_id);
@@ -141,7 +146,7 @@ impl Frame {
         Frame {
             channel_id,
             frame_type: FrameType::Bulk,
-            control: true,
+            control: false,
             encrypted: false,
             total_length: None,
             payload: payload.freeze(),
@@ -157,8 +162,9 @@ mod tests {
     fn bulk_roundtrip() {
         let f = Frame::bulk_control(0, 1, &[0xDE, 0xAD, 0xBE, 0xEF]);
         let bytes = f.encode();
-        // Header: chan=0, flags=BULK|CONTROL=0x07, len=6 (msgid 2 + body 4)
-        assert_eq!(&bytes[..4], &[0x00, 0x07, 0x00, 0x06]);
+        // Header: chan=0, flags=BULK=0x03 (no CONTROL bit — DHU doesn't set it),
+        // len=6 (msgid 2 + body 4)
+        assert_eq!(&bytes[..4], &[0x00, 0x03, 0x00, 0x06]);
         // Payload: msgid 0x0001 + body
         assert_eq!(&bytes[4..], &[0x00, 0x01, 0xDE, 0xAD, 0xBE, 0xEF]);
 
@@ -166,7 +172,7 @@ mod tests {
         let parsed = Frame::parse(&mut buf).unwrap().unwrap();
         assert_eq!(parsed.channel_id, 0);
         assert_eq!(parsed.frame_type, FrameType::Bulk);
-        assert!(parsed.control);
+        assert!(!parsed.control);
         assert!(!parsed.encrypted);
         assert_eq!(parsed.total_length, None);
         assert_eq!(parsed.payload.len(), 6);

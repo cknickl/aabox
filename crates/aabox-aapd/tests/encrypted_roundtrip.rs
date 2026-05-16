@@ -10,7 +10,7 @@
 
 use aabox_aapd::control::{read_frame, write_frame};
 use aabox_aapd::encrypted::{decrypt_payload, encrypt_payload};
-use aabox_aapd::framing::{Frame, FrameType, FLAG_BULK, FLAG_CONTROL, FLAG_ENCRYPTED};
+use aabox_aapd::framing::{Frame, FrameType, FLAG_BULK, FLAG_ENCRYPTED};
 use aabox_aapd::{services, tls, tls_tunnel};
 use aabox_common::{ChannelId, ControlMessageId};
 use aabox_proto::messages::ServiceDiscoveryResponse;
@@ -68,14 +68,15 @@ async fn full_handshake_then_encrypted_sdr() {
     let frame = Frame {
         channel_id: ChannelId::Control as u8,
         frame_type: FrameType::Bulk,
-        control: true,
+        control: false,
         encrypted: true,
         total_length: None,
         payload: Bytes::from(ciphertext),
     };
-    // Sanity: encoded flags byte should be BULK | CONTROL | ENCRYPTED
+    // Sanity: encoded flags byte should be BULK | ENCRYPTED (no CONTROL bit;
+    // DHU 2.0 doesn't use it).
     let encoded = frame.encode();
-    assert_eq!(encoded[1], FLAG_BULK | FLAG_CONTROL | FLAG_ENCRYPTED);
+    assert_eq!(encoded[1], FLAG_BULK | FLAG_ENCRYPTED);
     write_frame(&mut client, &frame).await.unwrap();
 
     server.await.unwrap();

@@ -17,11 +17,12 @@ async fn version_handshake_against_fake_head_unit() {
 
     let server = tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
-        // Expect: a control-channel BULK frame with VersionRequest (msg id 0x0001)
+        // Expect: a control-channel BULK frame with VersionRequest (msg id 0x0001).
+        // DHU 2.0 doesn't set the CONTROL flag bit, and we mirror that.
         let req = control::read_frame(&mut sock).await.unwrap();
         assert_eq!(req.channel_id, ChannelId::Control as u8);
         assert_eq!(req.frame_type, FrameType::Bulk);
-        assert!(req.control);
+        assert!(!req.control);
         let msg_id = u16::from_be_bytes([req.payload[0], req.payload[1]]);
         assert_eq!(msg_id, ControlMessageId::VersionRequest as u16);
         let req_major = u16::from_be_bytes([req.payload[2], req.payload[3]]);

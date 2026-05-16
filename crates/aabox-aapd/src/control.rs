@@ -192,10 +192,10 @@ pub fn ssl_handshake_frame(body: &[u8]) -> Frame {
 }
 
 /// Extract the inner SSL payload from an SSL_HANDSHAKE frame. Errors if the
-/// frame isn't a control-channel SslHandshake.
+/// frame isn't on the control channel with msg_id == SslHandshake.
 pub fn ssl_handshake_body(frame: &Frame) -> Result<&[u8]> {
-    if frame.channel_id != ChannelId::Control as u8 || !frame.control {
-        bail!("not a control-channel frame");
+    if frame.channel_id != ChannelId::Control as u8 {
+        bail!("not a control-channel frame (got channel {})", frame.channel_id);
     }
     if frame.payload.len() < 2 {
         bail!("control payload too short");
@@ -223,7 +223,8 @@ mod tests {
         let bytes = f.encode();
         // First 4 bytes header, then msg id (2 bytes BE), then body
         assert_eq!(bytes[0], 0); // control channel
-        assert_eq!(bytes[1] & 0x07, 0x07); // BULK + CONTROL
+        // BULK only — no CONTROL bit, matching DHU's wire format.
+        assert_eq!(bytes[1] & 0x0F, 0x03);
         assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 7);
         assert_eq!(u16::from_be_bytes([bytes[4], bytes[5]]), 0x0003);
         assert_eq!(&bytes[6..], body);
