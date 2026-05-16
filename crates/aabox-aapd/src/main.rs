@@ -75,8 +75,10 @@ fn dhu_listen(bind: String) -> anyhow::Result<()> {
         let (mut stream, peer) = listener.accept().await?;
         tracing::info!(?peer, "DHU connected");
 
-        let (peer_major, peer_minor) = control::version_handshake_responder(&mut stream).await?;
-        tracing::info!(peer_major, peer_minor, "version handshake complete");
+        // AAP role direction: the SOURCE (us) initiates the version exchange.
+        // DHU (head-unit role) replies. We use _initiator on the daemon side.
+        let (peer_major, peer_minor, status) = control::version_handshake_initiator(&mut stream).await?;
+        tracing::info!(peer_major, peer_minor, status, "version handshake complete");
 
         // Smoke: build TLS config (proves cert load) — full TLS handshake
         // over the AAP tunnel is the next Phase 3 deliverable.
