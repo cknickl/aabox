@@ -15,32 +15,43 @@ PATH="/aosp/aosp/out/host/linux-x86/bin:$PATH"
 
 A=(adb -s "$CM5_ADDR")
 
-# Sanity: must be root
-SHELL_ID=$("${A[@]}" shell id)
-echo "[install] shell uid: $SHELL_ID"
-[[ "$SHELL_ID" =~ uid=0 ]] || { echo "ERROR: not root. Run \`adb root\` first."; exit 1; }
+# Use `su 0` for individual commands. Keeping the adb shell unprivileged
+# avoids the wireless-TLS rotation that `adb root` causes; userdebug builds
+# expose `su 0 CMD` for escalation per-command.
+SU=(su 0)
+
+# Sanity check: ensure `su 0` works.
+ROOT_ID=$("${A[@]}" shell "su 0 id")
+echo "[install] su 0 id: $ROOT_ID"
+[[ "$ROOT_ID" =~ uid=0 ]] || { echo "ERROR: \`su 0\` failed. Are you on a userdebug build?"; exit 1; }
 
 echo "[install] remounting / rw..."
-"${A[@]}" shell "mount -o rw,remount /"
+"${A[@]}" shell "su 0 mount -o rw,remount /"
 
 echo "[install] cross-compiling latest daemon..."
 ./tools/build-android.sh > /dev/null
 
-echo "[install] pushing binary + scripts + init.rc to /system..."
-"${A[@]}" push target/aarch64-linux-android/debug/aabox-aapd /system/bin/aabox-aapd
-"${A[@]}" push tools/aabox-aapd-watchdog-systembin.sh        /system/bin/aabox-aapd-watchdog.sh
-"${A[@]}" push tools/aabox-aapd.rc                            /system/etc/init/aabox-aapd.rc
+echo "[install] pushing binary + scripts to /data/local/tmp/ (adb daemon is uid=shell)..."
+"${A[@]}" push target/aarch64-linux-android/debug/aabox-aapd /data/local/tmp/aabox-aapd
+"${A[@]}" push tools/aabox-aapd-watchdog-systembin.sh        /data/local/tmp/aabox-aapd-watchdog.sh
+"${A[@]}" push tools/aabox-aapd.rc                            /data/local/tmp/aabox-aapd.rc
 
-echo "[install] setting permissions + selinux labels..."
-"${A[@]}" shell "chmod 755 /system/bin/aabox-aapd /system/bin/aabox-aapd-watchdog.sh"
-"${A[@]}" shell "chmod 644 /system/etc/init/aabox-aapd.rc"
-"${A[@]}" shell "restorecon -F /system/bin/aabox-aapd /system/bin/aabox-aapd-watchdog.sh /system/etc/init/aabox-aapd.rc || true"
+echo "[install] su 0 copy to /system, set perms + selinux labels..."
+"${A[@]}" shell "su 0 sh -c '
+    cp /data/local/tmp/aabox-aapd            /system/bin/aabox-aapd                    &&
+    cp /data/local/tmp/aabox-aapd-watchdog.sh /system/bin/aabox-aapd-watchdog.sh       &&
+    mkdir -p /system/etc/init                                                          &&
+    cp /data/local/tmp/aabox-aapd.rc          /system/etc/init/aabox-aapd.rc           &&
+    chmod 755 /system/bin/aabox-aapd /system/bin/aabox-aapd-watchdog.sh                 &&
+    chmod 644 /system/etc/init/aabox-aapd.rc                                            &&
+    restorecon -F /system/bin/aabox-aapd /system/bin/aabox-aapd-watchdog.sh /system/etc/init/aabox-aapd.rc 2>/dev/null
+    echo install-step OK'"
 
 echo "[install] killing any current aabox-aapd processes..."
-"${A[@]}" shell "pidof aabox-aapd && pkill -9 -f aabox-aapd; pidof aabox-aapd-watchdog && pkill -9 -f aabox-aapd-watchdog; true" >/dev/null 2>&1 || true
+"${A[@]}" shell "su 0 sh -c 'pidof aabox-aapd && pkill -9 -f aabox-aapd; pidof aabox-aapd-watchdog && pkill -9 -f aabox-aapd-watchdog; true'" >/dev/null 2>&1 || true
 
 echo "[install] flush + remount /system ro..."
-"${A[@]}" shell "sync; mount -o ro,remount /"
+"${A[@]}" shell "su 0 sh -c 'sync; mount -o ro,remount /'"
 
 echo "[install] reloading init parser (or fall back to reboot)..."
 # Android's init re-reads /system/etc/init/*.rc on startup. For an immediate
