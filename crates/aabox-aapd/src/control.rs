@@ -93,14 +93,17 @@ where
     }
     let peer_major = u16::from_be_bytes([req.payload[2], req.payload[3]]);
     let peer_minor = u16::from_be_bytes([req.payload[4], req.payload[5]]);
+    tracing::debug!(req_hex = %hex_dump(&req.payload), "VersionRequest raw payload");
     tracing::info!(peer_major, peer_minor, "VersionRequest received");
 
-    // Reply with our own version + status=0 (OK). aasdk's status enum:
-    //   0 = OK, 1 = MISMATCH. Most cars treat any minor diff as compatible.
-    let mut body = BytesMut::with_capacity(6);
+    // Reply with our own version. DHU 2.0 expects a 6-byte VersionResponse:
+    // msg_id + major + minor only, no status field (sending status causes DHU
+    // to reject the message as "unexpected"). Older aasdk-shaped head units
+    // historically tolerated 8 bytes with a u16 status — but DHU and likely
+    // newer cars are strict on the 6-byte form.
+    let mut body = BytesMut::with_capacity(4);
     body.put_u16(PROTOCOL_MAJOR);
     body.put_u16(PROTOCOL_MINOR);
-    body.put_u16(0);
 
     let resp = Frame::bulk_control(
         ChannelId::Control as u8,
