@@ -1,0 +1,27 @@
+# Android init service: aabox-resigner.
+# Goes to /system/etc/init/aabox-resigner.rc.
+#
+# Watches /sdcard/Download for new CarCar Launcher APKs (the
+# com.carcarlauncher.installer in-app updater drops them there). When a
+# new APK appears, the daemon patches every classes*.dex to clamp
+# Build.VERSION.SDK_INT reads to 35, re-signs with the AABox platform key,
+# and `pm install`s the result over the existing com.example.car_launcher
+# slot.
+#
+# Without this service, every CarCar Launcher update has to be hand-patched
+# on a laptop with baksmali + smali + apksigner before flashing.
+
+service aabox_resigner /system/bin/aabox-resigner --watch
+    class late_start
+    user root
+    group root
+    seclabel u:r:su:s0
+    disabled
+
+# Start after the framework is fully up. We need:
+#   1. /sdcard mounted (depends on user 0 being unlocked)
+#   2. /vendor mounted (for the keys)
+#   3. pm responsive (for the install step)
+# sys.boot_completed=1 implies all of the above.
+on property:sys.boot_completed=1
+    start aabox_resigner

@@ -3,7 +3,7 @@ name = "aabox-resigner"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "On-device service that intercepts failed CarCar updates, patches the dex, re-signs with AABox platform key, retries install."
+description = "On-device service that watches for CarCar Launcher updates, patches the DEX SDK_INT version gates, re-signs with the AABox platform key, and installs the patched APK."
 
 [[bin]]
 name = "aabox-resigner"
@@ -20,7 +20,36 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 clap.workspace = true
 
+# ZIP / APK manipulation. Default features pull in deflate/bzip2/zstd; we only
+# need deflate (the only compression APKs use besides STORED). Enabling
+# `deflate` transitively pulls in flate2/rust_backend (pure-Rust miniz_oxide)
+# which cross-compiles to aarch64-linux-android without an external zlib.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Pure-Rust crypto. ring covers SHA-256 + RSA-PKCS1-v1_5-SHA256 which is all
+# we need for APK v2 signing.
+ring = "0.17"
+
+# X.509 / PKCS#8 / SubjectPublicKeyInfo parsing for the AABox platform key + cert.
+# These are pure-Rust, MIT-licensed.
+pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
+x509-cert = { version = "0.2", features = ["pem"] }
+der = "0.7"
+
+# CRC32 for ZIP entries (we re-emit STORED entries so we need to recompute).
+crc32fast = "1"
+
+# Linux inotify for the daemon-mode file watcher.
+[target.'cfg(target_os = "linux")'.dependencies]
+inotify = { version = "0.11", default-features = false }
+
 [target.'cfg(target_os = "android")'.dependencies]
+inotify = { version = "0.11", default-features = false }
 jni.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+ring = "0.17"

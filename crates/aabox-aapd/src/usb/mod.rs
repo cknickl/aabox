@@ -61,17 +61,18 @@ pub async fn wait_for_accessory() -> Result<OwnedFd> {
         })?;
 
     let fd = stream::open()?;
-    tracing::info!(?fd, "/dev/usb_accessory opened — waiting for host AOAv2 handshake");
+    tracing::info!(?fd, "/dev/usb_accessory opened — returning fd; caller will block on read until host drives AOAv2 handshake");
 
-    // Cosmetic: log if we see ACCESSORY=START within the next minute. Reads
-    // on the fd will start returning bytes when the kernel finishes the
-    // handshake regardless of whether we caught the uevent.
-    tokio::select! {
-        _ = notify.notified() => tracing::info!("ACCESSORY=START uevent observed"),
-        _ = tokio::time::sleep(Duration::from_secs(60)) => {
-            tracing::info!("60s elapsed without ACCESSORY=START — that's fine; reads will block until a host plugs in");
+    // Cosmetic ACCESSORY=START watcher runs in the background so the caller
+    // can start reading immediately. Previous version blocked here for up to
+    // 60s, which raced the KIA: car would send VersionRequest, wait ~10s for
+    // our response while we were still in this sleep, then disconnect.
+    tokio::spawn(async move {
+        match tokio::time::timeout(Duration::from_secs(60), notify.notified()).await {
+            Ok(_) => tracing::info!("ACCESSORY=START uevent observed"),
+            Err(_) => tracing::debug!("no ACCESSORY=START uevent in 60s (cosmetic — reads may still be working)"),
         }
-    }
+    });
 
     Ok(fd)
 }

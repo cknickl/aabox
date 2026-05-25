@@ -13,6 +13,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::ResolvesServerCert;
+use rustls::sign::CertifiedKey;
 use rustls::{ClientConfig, ServerConfig};
 use std::sync::Arc;
 
@@ -70,6 +72,12 @@ fn key_into_der(key: PrivateKeyDer<'static>) -> PrivateKeyDer<'static> {
 /// is the TLS *server* — empirically confirmed against DHU 2.0 whose
 /// BoringSSL log says `TLS client read_server_hello`. So this is our
 /// production-path config, not just a test fixture.
+///
+/// The aasdk JVC Kenwood cert is X.509 v1 (predates v3 extensions). rustls's
+/// `with_single_cert()` rejects v1 via webpki. We bypass that by using
+/// `with_cert_resolver()` instead, which takes a pre-built `CertifiedKey`
+/// constructed directly from the raw DER bytes + signing key — no version
+/// check occurs. DHU (BoringSSL) accepts v1 certs fine.
 pub fn build_server_config() -> Result<Arc<ServerConfig>> {
     let provider = rustls::crypto::ring::default_provider();
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut std::io::Cursor::new(
@@ -81,18 +89,41 @@ pub fn build_server_config() -> Result<Arc<ServerConfig>> {
         .context("parse headunit key (server)")?
         .ok_or_else(|| anyhow!("no private key (server)"))?;
 
-    // AAP requires mutual TLS: HU (TLS client) presents its own cert and we
-    // verify it. milek7's notes (huig13_cache.html): "TLS 1.2 with Client
-    // Authentication... two certificates signed by the Google CA". We don't
-    // have Google's CA so we accept any client cert (same trust model as the
-    // headunit cert side — auth via shared protocol-key knowledge, not PKI).
+    // Build signing key from private key only — does NOT touch the cert, so
+    // the v1 cert passes through unchecked.
+    let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
+        .map_err(|e| anyhow!("build signing key: {:?}", e))?;
+    let certified_key = Arc::new(CertifiedKey::new(certs, signing_key));
+
+    // No mTLS request. Empirically (vs. KIA Carnival) sending CertificateRequest
+    // breaks the handshake: rustls's default ClientCertVerifier has
+    // client_auth_mandatory=true, so when KIA presented (or didn't present) a
+    // client cert that we couldn't validate, we aborted and KIA closed USB →
+    // EIO. AAP's auth model is unilateral: HU validates source cert, source
+    // doesn't validate HU cert.
+    // TLS 1.2 only. aa-proxy-rs, AAServer, and aasdk all explicitly disable
+    // TLS 1.3 (NO_TLSV1_3 / SSL_OP_NO_TLSv1_3). HU stacks built on aasdk-era
+    // BoringSSL expect 1.2-shaped record sequencing (ChangeCipherSpec
+    // unencrypted between Finished, no NewSessionTicket reordering, etc.).
     let cfg = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS12])
         .context("server protocol_versions")?
-        .with_client_cert_verifier(Arc::new(NoClientVerification))
-        .with_single_cert(certs, key)
-        .context("server with_single_cert")?;
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(SingleCertResolver(certified_key)));
     Ok(Arc::new(cfg))
+}
+
+/// Trivial cert resolver: always returns the same pre-built cert+key pair.
+#[derive(Debug)]
+struct SingleCertResolver(Arc<CertifiedKey>);
+
+impl ResolvesServerCert for SingleCertResolver {
+    fn resolve(
+        &self,
+        _client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<CertifiedKey>> {
+        Some(Arc::clone(&self.0))
+    }
 }
 
 /// Custom client-cert verifier: accept any client cert (HU presents Google-

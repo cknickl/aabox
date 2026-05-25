@@ -2,12 +2,18 @@
 //!
 //! The Android service-wrapper loads this as a cdylib over JNI.
 
+pub mod channels;
 pub mod control;
+pub mod control_channel;
 pub mod encrypted;
 pub mod framing;
+pub mod nav;
 pub mod services;
 pub mod tls;
 pub mod tls_tunnel;
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod kmsg;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod usb;

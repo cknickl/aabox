@@ -18,6 +18,10 @@ pub enum ChannelId {
     SystemAudio = 6,
     AvInput = 7,
     Bluetooth = 8,
+    /// Navigation Status channel: source -> sink turn-by-turn icons + voice
+    /// guidance. Negotiated as a non-fixed service id per aasdk's
+    /// `ChannelDescriptor.navigation_channel`; we pin it to channel 9.
+    Navigation = 9,
     None = 255,
 }
 
@@ -35,6 +39,7 @@ impl TryFrom<u8> for ChannelId {
             6 => Ok(Self::SystemAudio),
             7 => Ok(Self::AvInput),
             8 => Ok(Self::Bluetooth),
+            9 => Ok(Self::Navigation),
             255 => Ok(Self::None),
             other => Err(other),
         }

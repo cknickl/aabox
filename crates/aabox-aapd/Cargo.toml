@@ -29,6 +29,11 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 bytes.workspace = true
 clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
+libc = "0.2"
 
 # Linux + Android: USB gadget hot-swap via ConfigFS + netlink uevents
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
@@ -39,3 +44,12 @@ nix.workspace = true
 # JNI only when targeting Android (NDK)
 [target.'cfg(target_os = "android")'.dependencies]
 jni.workspace = true
+
+[dev-dependencies]
+# Mock HTTP server for the OSRM client unit tests. Pulls in hyper/tokio that
+# we already have in the tree, so the build cost is small.
+wiremock = "0.6"
+# tokio's test-util feature unlocks `#[tokio::test(start_paused = true)]`,
+# which the video-pipeline unit tests use to avoid waiting wall-clock seconds
+# for the frame pacer. Cheap dev-only enable.
+tokio = { workspace = true, features = ["test-util"] }

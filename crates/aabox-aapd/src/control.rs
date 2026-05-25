@@ -96,11 +96,13 @@ where
     tracing::debug!(req_hex = %hex_dump(&req.payload), "VersionRequest raw payload");
     tracing::info!(peer_major, peer_minor, "VersionRequest received");
 
-    // Reply with our own version. DHU 2.0 expects a 6-byte VersionResponse:
-    // msg_id + major + minor only, no status field (sending status causes DHU
-    // to reject the message as "unexpected"). Older aasdk-shaped head units
-    // historically tolerated 8 bytes with a u16 status — but DHU and likely
-    // newer cars are strict on the 6-byte form.
+    // Reply with our own version (4-byte payload: major + minor only).
+    // We experimented with the 8-byte form (major+minor+status) per aasdk's
+    // VersionResponseStatusEnum but the KIA actually breaks TLS mid-stream
+    // when we send the extra status u16. The 4-byte form is what gets us
+    // through; AAP auth failure (-3) when using the 4-byte form was due
+    // to wrong cert content (borconi `O=Google-Android-Reference`), now
+    // replaced with Carlinkit's Client.crt (`O=CarService`).
     let mut body = BytesMut::with_capacity(4);
     body.put_u16(PROTOCOL_MAJOR);
     body.put_u16(PROTOCOL_MINOR);
@@ -127,7 +129,15 @@ where
         "TX frame wire bytes"
     );
     stream.write_all(&bytes).await.context("write frame")?;
-    stream.flush().await.context("flush frame")?;
+    // DELIBERATELY NOT calling `stream.flush().await` here. When `stream` is
+    // a `tokio::fs::File` wrapping `/dev/usb_accessory`, `poll_flush` calls
+    // `lseek` internally to discard read-buffer overshoot — which returns
+    // ESPIPE on a non-seekable chardev. Every 2026-05-24 KIA test died on
+    // that error mid-video-stream. `write_all` already completes the
+    // underlying `write(2)` syscall before returning (tokio runs it on a
+    // blocking worker), so the bytes have already been queued to the bulk
+    // USB endpoint by the kernel by the time we reach this point. No flush
+    // is needed at the AAP layer.
     Ok(())
 }
 
@@ -138,15 +148,41 @@ pub async fn read_frame<S>(stream: &mut S) -> Result<Frame>
 where
     S: tokio::io::AsyncRead + Unpin,
 {
-    let mut header = [0u8; 4];
-    stream.read_exact(&mut header).await.context("read frame header")?;
-    tracing::debug!(
-        header = %hex_dump(&header),
-        "RX frame header"
+    use tokio::io::AsyncReadExt;
+
+    // Diagnostic single-read: ask the kernel for up to 4096 bytes in one
+    // syscall. The KIA observation showed read_exact(4) succeeding then
+    // read_exact(6) blocking-then-EIO, which would mean the kernel only
+    // delivered 4 bytes per acc_read call (one usb_request per read). With
+    // a bigger buffer we'll see exactly what one read returns. If it's
+    // ≥ header+payload (10 bytes for VersionRequest/SslHandshake), we have
+    // the whole frame; if it's <4, we got a partial header and need to keep
+    // reading; if it's exactly 4 and the next read blocks, the kernel is
+    // fragmenting and we'll need to handle that explicitly.
+    let mut buf = vec![0u8; 4096];
+    let n = match stream.read(&mut buf).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, kind = ?e.kind(), "first read on stream failed");
+            return Err(anyhow::Error::new(e)).context("read first chunk");
+        }
+    };
+    tracing::info!(
+        n_bytes = n,
+        hex = %hex_dump(&buf[..n.min(128)]),
+        "RAW first read"
     );
-    let channel_id = header[0];
-    let flags = header[1];
-    let payload_len = u16::from_be_bytes([header[2], header[3]]) as usize;
+    if n == 0 {
+        anyhow::bail!("first read returned 0 bytes (EOF) — host disconnected before sending data");
+    }
+    if n < 4 {
+        anyhow::bail!("first read returned {} bytes — too few for frame header", n);
+    }
+
+    let channel_id = buf[0];
+    let flags = buf[1];
+    let payload_len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+    let mut consumed = 4;
 
     let frame_type = match flags & 0x03 {
         0x03 => FrameType::Bulk,
@@ -156,15 +192,43 @@ where
     };
 
     let total_length = if frame_type == FrameType::First {
-        let mut tl = [0u8; 4];
-        stream.read_exact(&mut tl).await.context("read total length")?;
-        Some(u32::from_be_bytes(tl))
+        if n < consumed + 4 {
+            anyhow::bail!(
+                "first frame needs total_length but only got {} bytes",
+                n
+            );
+        }
+        let tl = u32::from_be_bytes([buf[consumed], buf[consumed + 1], buf[consumed + 2], buf[consumed + 3]]);
+        consumed += 4;
+        Some(tl)
     } else {
         None
     };
 
     let mut payload = vec![0u8; payload_len];
-    stream.read_exact(&mut payload).await.context("read frame payload")?;
+    let available_in_buf = n.saturating_sub(consumed);
+    let from_buf = available_in_buf.min(payload_len);
+    if from_buf > 0 {
+        payload[..from_buf].copy_from_slice(&buf[consumed..consumed + from_buf]);
+    }
+    if from_buf < payload_len {
+        // Need to read more from the stream to complete the payload.
+        let still_needed = payload_len - from_buf;
+        tracing::info!(
+            already_in_buf = from_buf,
+            still_needed,
+            "payload not fully in first read; reading remainder via read_exact"
+        );
+        if let Err(e) = stream.read_exact(&mut payload[from_buf..]).await {
+            tracing::warn!(
+                error = %e,
+                kind = ?e.kind(),
+                still_needed,
+                "read frame payload-remainder failed"
+            );
+            return Err(anyhow::Error::new(e)).context("read frame payload remainder");
+        }
+    }
     tracing::debug!(
         n = payload.len(),
         payload = %hex_dump(&payload),
