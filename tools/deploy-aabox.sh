@@ -56,10 +56,12 @@ echo "=== Pushing aabox-aapd ==="
 $A push "$BINARY" /system/bin/aabox-aapd
 $A shell chmod 755 /system/bin/aabox-aapd
 
-# ── Step 5: push init RC files ────────────────────────────────────────────────
-echo "=== Pushing init RC files ==="
-$A push "${AABOX_DIR}/tools/aabox-aapd.rc" /vendor/etc/init/aabox-aapd.rc
-$A push "${AABOX_DIR}/tools/aabox-usb.rc"  /vendor/etc/init/aabox-usb.rc
+# ── Step 5: push init RC files + bind script ─────────────────────────────────
+echo "=== Pushing init RC files and bind script ==="
+$A push "${AABOX_DIR}/tools/aabox-aapd.rc"     /vendor/etc/init/aabox-aapd.rc
+$A push "${AABOX_DIR}/tools/aabox-usb.rc"      /vendor/etc/init/aabox-usb.rc
+$A push "${AABOX_DIR}/tools/aabox-usb-bind.sh" /system/bin/aabox-usb-bind.sh
+$A shell chmod 755 /system/bin/aabox-usb-bind.sh
 
 # ── Step 6: reboot so persist.adb.tcp.port and init RCs take effect ───────────
 echo "=== Rebooting ==="

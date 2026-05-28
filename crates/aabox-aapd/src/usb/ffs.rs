@@ -128,9 +128,11 @@ fn setup_configfs_gadget() -> Result<()> {
     let g = Path::new(GADGET_PATH);
     fs::create_dir_all(g).context("create gadget dir")?;
 
-    write_file(&g.join("idVendor"),  "0x18d1\n")?;
-    write_file(&g.join("idProduct"), "0x2D00\n")?;
-    write_file(&g.join("bcdDevice"), "0x0200\n")?;
+    write_file(&g.join("idVendor"),        "0x18d1\n")?;
+    write_file(&g.join("idProduct"),       "0x2D00\n")?;
+    write_file(&g.join("bcdUSB"),          "0x0200\n")?;
+    write_file(&g.join("bcdDevice"),       "0x0200\n")?;
+    write_file(&g.join("bMaxPacketSize0"), "0x40\n")?;
 
     let s = g.join("strings/0x409");
     fs::create_dir_all(&s).ok();
@@ -209,10 +211,28 @@ fn release_g1_via_init() -> Result<()> {
         return Ok(());
     }
 
+    // Tell the Rockchip USB HAL we're switching to aabox mode so it stops
+    // managing g1.  Then write "none" directly in case the init.rc trigger
+    // is slow to fire (happens on daemon restart when the property may already
+    // equal "aabox" from a previous run and init skips the transition).
     tracing::info!("requesting g1 UDC release via sys.usb.config=aabox");
-    setprop("sys.usb.config", "aabox")?;
+    let _ = setprop("sys.usb.config", "aabox");
 
-    for _ in 0..40 {
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(100));
+        let val = fs::read_to_string(g1_udc).unwrap_or_default();
+        if val.trim().is_empty() || val.trim() == "none" {
+            tracing::info!("g1 UDC released via init.rc");
+            return Ok(());
+        }
+    }
+
+    // init.rc trigger didn't fire quickly; write directly.
+    // WiFi ADB is TCP-based and survives the g1 USB gadget going offline.
+    tracing::info!("init.rc slow — writing g1/UDC=none directly");
+    fs::write(g1_udc, "\n").context("write none to g1/UDC")?;
+
+    for _ in 0..20 {
         std::thread::sleep(Duration::from_millis(100));
         let val = fs::read_to_string(g1_udc).unwrap_or_default();
         if val.trim().is_empty() || val.trim() == "none" {
@@ -220,7 +240,22 @@ fn release_g1_via_init() -> Result<()> {
             return Ok(());
         }
     }
-    anyhow::bail!("g1 UDC did not release after 4s — is aabox-usb.rc installed?")
+    anyhow::bail!("g1 UDC did not release after 3s")
+}
+
+/// Ensure the aabox gadget is unbound from the UDC before (re)writing FFS
+/// descriptors.  Writing to ep0 while the gadget is already bound produces
+/// a stale/broken FFS function state that causes the composite layer to stall
+/// GET_DESCRIPTOR requests.
+fn unbind_gadget() {
+    let udc_path = Path::new(GADGET_PATH).join("UDC");
+    let current = fs::read_to_string(&udc_path).unwrap_or_default();
+    if current.trim().is_empty() || current.trim() == "none" {
+        return;
+    }
+    tracing::info!("unbinding aabox gadget from UDC before descriptor re-write");
+    let _ = fs::write(&udc_path, "\n");
+    std::thread::sleep(Duration::from_millis(200));
 }
 
 fn bind_gadget(udc: &str) -> Result<()> {
@@ -276,6 +311,11 @@ pub fn setup_and_wait() -> Result<FfsEndpoints> {
     tracing::info!(udc, "setting up FunctionFS gadget");
 
     setup_configfs_gadget()?;
+    // Unbind before (re)writing FFS descriptors.  If the daemon restarted with
+    // the gadget still bound from the previous run, writing descriptors to ep0
+    // while bound corrupts the FFS function state and causes the composite
+    // layer to stall even standard GET_DESCRIPTOR requests.
+    unbind_gadget();
     mount_functionfs()?;
 
     // Open ep0 — must precede UDC bind so the kernel can exchange setup with us
@@ -292,7 +332,7 @@ pub fn setup_and_wait() -> Result<FfsEndpoints> {
     release_g1_via_init()?;
     bind_gadget(&udc)?;
 
-    tracing::info!("waiting for AOA handshake from head unit");
+    tracing::info!("waiting for ENABLE or AOA handshake from head unit");
     let mut buf = [0u8; FFS_EVENT_SIZE];
 
     loop {
@@ -301,8 +341,25 @@ pub fn setup_and_wait() -> Result<FfsEndpoints> {
         let ev = buf[8];
         match ev {
             FFS_BIND    => tracing::info!("ffs: BIND"),
-            FFS_UNBIND  => tracing::warn!("ffs: UNBIND — host disconnected before AOA_START"),
-            FFS_ENABLE  => tracing::info!("ffs: ENABLE — USB connection established"),
+            FFS_UNBIND  => anyhow::bail!("ffs: UNBIND — USB disconnected before host enabled our config"),
+            FFS_ENABLE  => {
+                // Host selected our configuration (SET_CONFIGURATION).  Hosts
+                // that already see PID=0x2D00 as an accessory skip the AOA
+                // vendor probe and go straight to AAP on the bulk endpoints.
+                tracing::info!("ffs: ENABLE — host selected config, opening bulk endpoints");
+                let ep_out_file = fs::OpenOptions::new()
+                    .read(true)
+                    .open(EP_OUT)
+                    .context("open ep_out on ENABLE")?;
+                let ep_in_file = fs::OpenOptions::new()
+                    .write(true)
+                    .open(EP_IN)
+                    .context("open ep_in on ENABLE")?;
+                return Ok(FfsEndpoints {
+                    ep_out: OwnedFd::from(ep_out_file),
+                    ep_in:  OwnedFd::from(ep_in_file),
+                });
+            }
             FFS_DISABLE => tracing::info!("ffs: DISABLE"),
 
             FFS_SETUP => {

@@ -1,29 +1,38 @@
-# aabox-usb.rc — USB gadget switching + fan control for AABox.
+# aabox-usb.rc — USB gadget setup + fan control for AABox (Android 12 / Rock 5B+).
+#
+# At sys.boot_completed=1:
+#   1. Run aabox-usb-bind.sh as a oneshot: swap g1 into composite
+#      ffs.adb + accessory.gs2 mode with Pixel-class descriptors and bind
+#      to UDC. Leaves USB-ADB live alongside the AAP accessory interface.
+#   2. Park the thermal governor on every zone (write policy=user_space)
+#      and crank the PWM fan to a safe steady-state. Cooling is hard-coded
+#      because the default Rockchip thermal trips never fire under idle
+#      / Android-Auto load and the device cooks otherwise. Lower duty
+#      cycle TBD once we have temp-vs-noise data from in-car runs
+#      (see [[project-fan-todo]]).
 
-# Fan: the Rockchip pwm-fan driver uses rockchip,temp-trips to auto-control
-# the fan, but the 50°C first trip means it never spins at idle.  Switching
-# thermal zones to user_space mode stops the governor from resetting the PWM,
-# then we run the fan at 100% (255) always.  This motor takes 10-30s to spin
-# up from cold at 100% duty — that's normal for this BLDC; it will be running
-# well before the car connects.  TODO: tune to a lower steady-state duty once
-# we have temp vs. noise data from in-car use (see memory: project-fan-todo).
+service aabox_usb_bind /system/bin/aabox-usb-bind.sh
+    class late_start
+    user root
+    group root
+    seclabel u:r:su:s0
+    oneshot
+    disabled
+
 on property:sys.boot_completed=1
-    write /sys/class/thermal/thermal_zone0/mode user_space
-    write /sys/class/thermal/thermal_zone1/mode user_space
-    write /sys/class/thermal/thermal_zone2/mode user_space
-    write /sys/class/thermal/thermal_zone3/mode user_space
-    write /sys/class/thermal/thermal_zone4/mode user_space
-    write /sys/class/thermal/thermal_zone5/mode user_space
-    write /sys/class/thermal/thermal_zone6/mode user_space
-    write /sys/devices/platform/pwm-fan/hwmon/hwmon8/pwm1 255
+    # Fan: park the thermal governor so it stops overriding our PWM. The
+    # correct sysfs file is `policy` (not `mode` — that only accepts
+    # enabled/disabled and was a long-standing bug in this RC).
+    write /sys/class/thermal/thermal_zone0/policy user_space
+    write /sys/class/thermal/thermal_zone1/policy user_space
+    write /sys/class/thermal/thermal_zone2/policy user_space
+    write /sys/class/thermal/thermal_zone3/policy user_space
+    write /sys/class/thermal/thermal_zone4/policy user_space
+    write /sys/class/thermal/thermal_zone5/policy user_space
+    write /sys/class/thermal/thermal_zone6/policy user_space
+    write /sys/class/hwmon/hwmon8/pwm1 200
 
-# Switch to aabox FunctionFS gadget (displaces g1 from UDC).
-# Does NOT stop adbd — WiFi ADB survives.
-on property:sys.usb.config=aabox && property:sys.usb.configfs=1
-    write /config/usb_gadget/g1/UDC "none"
-    setprop sys.usb.state aabox
-
-# Restore adb mode when aabox session ends.
-on property:sys.usb.config=aabox-done && property:sys.usb.configfs=1
-    write /config/usb_gadget/aabox/UDC "none"
-    setprop sys.usb.config adb
+    # USB gadget: swap g1 to composite (ffs.adb + accessory.gs2) with
+    # phone-class descriptors. Runs late so the Rockchip USB HAL has
+    # already finished its initial setCurrentUsbFunctions("adb") call.
+    start aabox_usb_bind

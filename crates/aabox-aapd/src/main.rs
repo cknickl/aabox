@@ -279,9 +279,11 @@ fn usb_run(status: Status, nav: NavOptions) -> anyhow::Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        status.set("usb-run: waiting for AOA handshake via FunctionFS");
-        let mut stream = usb::wait_for_ffs_accessory().await?;
-        tracing::info!("FunctionFS bulk endpoints open — AOA handshake complete");
+        status.set("usb-run: opening /dev/usb_accessory");
+        let fd = usb::wait_for_accessory().await?;
+        let mut stream = usb::stream::UsbAccessoryStream::new(fd)
+            .map_err(|e| anyhow::anyhow!("UsbAccessoryStream::new: {e}"))?;
+        tracing::info!("/dev/usb_accessory open — reads will block until host completes AOA");
 
         // Step 1: AAP version handshake — but DHU `-u` mode SKIPS this.
         //

@@ -1,10 +1,15 @@
 # Android init service for AABox — Android 12 (Radxa Rock 5B+) variant.
 # Goes to /vendor/etc/init/aabox-aapd.rc.
 #
-# For the AOSP 14 / CM5 variant see the aosp14 branch; that version uses
-# aabox-usb-bind.sh + a watchdog wrapper instead of the direct daemon call.
+# Boot ordering:
+#   sys.boot_completed=1
+#     → aabox_usb_bind (oneshot, in aabox-usb.rc) does the configfs swap
+#     → on completion sets aabox.usb.ready=1
+#         → aabox_aapd starts and opens /dev/usb_accessory
 #
-# USB gadget switching and fan control live in aabox-usb.rc (same dir).
+# Starting the daemon BEFORE the gadget is composed wastes restart cycles
+# (every open of /dev/usb_accessory returns ENODEV until accessory.gs2 is
+# in an active config), so we gate on the property edge.
 
 service aabox_aapd /system/bin/aabox-aapd usb-run
     class main
@@ -12,6 +17,10 @@ service aabox_aapd /system/bin/aabox-aapd usb-run
     group root
     restart_period 5
     seclabel u:r:su:s0
+    disabled
+
+on property:aabox.usb.ready=1
+    start aabox_aapd
 
 on boot
     write /proc/sys/kernel/printk "3 4 1 7"

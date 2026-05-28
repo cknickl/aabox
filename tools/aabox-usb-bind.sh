@@ -66,54 +66,82 @@ fi
 cd "$GADGET" || exit 1
 echo "BEFORE: UDC=$(cat UDC 2>/dev/null), function0=$(readlink configs/b.1/function0 2>/dev/null)"
 
+# ── Step 0a: Wait for host disconnect before touching UDC ────────────────────
+# CRITICAL SAFETY: unbinding the UDC while a host is actively enumerating
+# (UDC state in {default, configured}) has deadlocked the kernel on Rock
+# 5B+ A12 in past runs (DWC3 + Rockchip USB HAL race). State "not attached"
+# means no host on VBUS — safe to manipulate the gadget. If a host is
+# present we wait up to 30s; if it doesn't go away, we BAIL and leave the
+# default ffs.adb-only gadget alone. Operator can re-run the bind script
+# manually once they've unplugged the cable.
+i=0
+while [ "$i" -lt 30 ]; do
+    st=$(cat "$UDC_NODE/state" 2>/dev/null)
+    if [ "$st" = "not attached" ] || [ -z "$st" ]; then
+        echo "[wait] UDC state=$st — safe to proceed (after ${i}s)"
+        break
+    fi
+    if [ "$i" = 0 ]; then
+        echo "[wait] UDC state=$st — host appears connected; waiting up to 30s for disconnect"
+    fi
+    sleep 1
+    i=$((i+1))
+done
+st=$(cat "$UDC_NODE/state" 2>/dev/null)
+if [ "$st" != "not attached" ] && [ -n "$st" ]; then
+    echo "ABORT: UDC state=$st after 30s — refusing to unbind while host is enumerating."
+    echo "       Unplug USB-C from Rock, then run: start aabox_usb_bind"
+    echo "       (Daemon will remain idle until aabox.usb.ready=1 is set.)"
+    exit 2
+fi
+
+# ── Step 0b: Park the Rockchip USB HAL ───────────────────────────────────────
+# init.usb.configfs.rc only fires on sys.usb.config in {adb,mtp,ptp,rndis,…}.
+# Setting it to a value that doesn't match disables the HAL's "rewrite the
+# UDC every state change" actions, so our unbind/modify/rebind below proceeds
+# without the HAL racing us back to ffs.adb mid-swap.
+setprop sys.usb.config aabox
+
 # ── Step 1: Unbind the gadget ────────────────────────────────────────────────
 # configfs does not allow removing or adding function symlinks while the gadget
 # is active — the kernel returns EBUSY. The rm -f below would silently fail
 # (and ln -s would then fail with EEXIST), leaving the gadget stuck in ADB
-# mode. Unbind first so the config is mutable.
+# mode. Unbind first so the config is mutable. Safe here: Step 0a confirmed
+# no host on VBUS.
 echo "" > UDC
 sleep 0.3
 
-# ── Step 2: Compose gadget = ffs.adb + accessory.gs2 ─────────────────────────
-# Previous versions removed ffs.adb and replaced it with accessory.gs2, then
-# called `stop adbd` to suppress adbd's "read descriptors" log spam. That
-# `stop adbd` triggered /system/etc/init/hw/init.usb.configfs.rc:14 which
-# raced our bind script and rewrote function0 to ffs.mtp mid-bind — kernel
-# returned -77 and the gadget ended up in an inconsistent state. system_server
-# then poked adbd again later, knocking function0 around during the KIA test.
-#
-# Fix: keep BOTH functions present. ffs.adb stays as function0, accessory.gs2
-# becomes function1. PID 0x2D01 (AOA + ADB) is the spec-blessed PID for this
-# combination. adbd never sees a state change, so the init.usb.configfs.rc
-# action never fires, and USB-ADB stays live across the car test — no more
-# HDMI+toggle recovery dance.
-echo "BEFORE function0=$(readlink configs/b.1/function0 2>/dev/null), function1=$(readlink configs/b.1/function1 2>/dev/null)"
+# ── Step 2: Single-function gadget = accessory.gs2 only ──────────────────────
+# 2026-05-28: tried composite (ffs.adb + accessory.gs2) — the SET_CONFIG #1
+# request from the host on the laptop side returned -EPROTO (-71) because
+# the kernel's set_alt(0) on ffs.adb fails when adbd's ep0 handshake is
+# racing the host enumeration. With ffs.adb removed and accessory.gs2 as the
+# sole interface, SET_CONFIG has no FFS dependency and enumeration succeeds
+# in one shot. Trade-off: USB-ADB stops working over this gadget. WiFi ADB
+# (persist.adb.tcp.port=5555) keeps the device reachable regardless.
+echo "BEFORE function slots:"
+ls configs/b.1/ | grep -E '^(f[0-9]|function[0-9])' || echo "  (none)"
 
-# FORCE the state regardless of what's there. Empirically, Android's USB HAL
-# races our bind and sometimes swaps function0/function1 (we've seen
-# accessory.gs2 land in function0 after our bind succeeded). When that happens
-# the previous script's "if [ ! -L function0 ]" check would skip setup,
-# leaving the gadget stuck in the wrong order. Solution: remove both slots
-# first, then re-create in canonical order. Order matters: function0=ffs.adb,
-# function1=accessory.gs2.
-# 2026-05-26: keep ffs.adb + accessory.gs2 BOTH in active config, but wait
-# for adbd's FunctionFS endpoint to be ready before writing UDC. Earlier
-# observation: re-binding UDC while adbd hadn't yet opened
-# /dev/usb-ffs/adb/ep0 caused set_alt(0) on ffs.adb to return -EPROTO →
-# host SET_CONFIG fails with -71 → USB disconnect → re-enumerate → race
-# again → flap loop (visible in both the openauto laptop dmesg and the
-# Carlinkit-vs-Rock comparison). The guard below blocks until adbd has
-# opened ep0 (max 10s) so the function is ready when the host probes.
-rm -f configs/b.1/function0
-rm -f configs/b.1/function1
-ln -s "$GADGET/functions/ffs.adb" configs/b.1/function0
-ln -s "$GADGET/functions/accessory.gs2" configs/b.1/function1
-echo "function0 → $(readlink configs/b.1/function0 2>/dev/null)"
-echo "function1 → $(readlink configs/b.1/function1 2>/dev/null)"
+# Remove every existing function symlink slot we know about. Rockchip's
+# vendor init uses "f1", "f2", …; the configfs-gadget-rs convention uses
+# "function0", "function1", … Cover both so we land in a known state.
+for s in f0 f1 f2 f3 function0 function1 function2 function3; do
+    [ -L "configs/b.1/$s" ] && rm -f "configs/b.1/$s"
+done
 
-# Wait for adbd to claim FunctionFS ep0. Toybox on this device lacks
-# `fuser`, so we check `/proc/<pid>/fd/*` symlinks for any reference to
-# /dev/usb-ffs/adb/ep0. Presence of any reader = adbd is ready.
+ln -s "$GADGET/functions/accessory.gs2" configs/b.1/f1
+echo "f1 → $(readlink configs/b.1/f1 2>/dev/null)"
+
+# NOTE: do NOT touch adbd here. Its init triggers require
+# sys.usb.config=adb, which we just parked to "aabox". Restarting adbd
+# in this state leaves it stopped and kills WiFi ADB (TCP listener dies
+# with adbd). The "read descriptors / read strings" 1Hz kernel log spam
+# from adbd's stranded FunctionFS instance is annoying but harmless —
+# accept it for now.
+
+# (No ffs.adb wait needed — single-function gadget; set_alt has no FFS
+# function to wait on.)
+if false; then
 adbd_has_ep0() {
     ls -l /proc/*/fd/ 2>/dev/null | grep -q 'usb-ffs/adb/ep0'
 }
@@ -130,6 +158,7 @@ done
 if [ "$i" -ge 50 ]; then
     echo "[warn] adbd never opened ep0 in 10s — proceeding anyway, may flap"
 fi
+fi  # end of `if false` guard around the disabled adbd-wait block
 
 # ── Step 4: Set device descriptor strings ───────────────────────────────────
 # IMPORTANT: car/AA head units sniff device descriptors before deciding
@@ -200,5 +229,16 @@ echo "  bDeviceClass=$(cat bDeviceClass 2>/dev/null)"
 # Step 6 (start adbd) removed: with the composite gadget approach, adbd was
 # never stopped, so it's still running. ffs.adb is still active in function0,
 # so USB-ADB stays live across this rebind — no recovery dance needed.
+
+# Signal that the gadget is composed and bound. aabox-aapd.rc listens for
+# `on property:aabox.usb.ready=1` and starts the daemon at that edge —
+# starting earlier just churns restart_period cycles since /dev/usb_accessory
+# returns ENODEV until accessory.gs2 is in an active config.
+if [ "$RC" = "0" ]; then
+    setprop aabox.usb.ready 1
+    echo "set aabox.usb.ready=1"
+else
+    echo "skipping aabox.usb.ready — UDC write failed (rc=$RC)"
+fi
 
 echo "==== done ===="
