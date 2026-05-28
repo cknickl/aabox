@@ -96,12 +96,40 @@ echo "BEFORE function0=$(readlink configs/b.1/function0 2>/dev/null), function1=
 # leaving the gadget stuck in the wrong order. Solution: remove both slots
 # first, then re-create in canonical order. Order matters: function0=ffs.adb,
 # function1=accessory.gs2.
+# 2026-05-26: keep ffs.adb + accessory.gs2 BOTH in active config, but wait
+# for adbd's FunctionFS endpoint to be ready before writing UDC. Earlier
+# observation: re-binding UDC while adbd hadn't yet opened
+# /dev/usb-ffs/adb/ep0 caused set_alt(0) on ffs.adb to return -EPROTO →
+# host SET_CONFIG fails with -71 → USB disconnect → re-enumerate → race
+# again → flap loop (visible in both the openauto laptop dmesg and the
+# Carlinkit-vs-Rock comparison). The guard below blocks until adbd has
+# opened ep0 (max 10s) so the function is ready when the host probes.
 rm -f configs/b.1/function0
 rm -f configs/b.1/function1
 ln -s "$GADGET/functions/ffs.adb" configs/b.1/function0
 ln -s "$GADGET/functions/accessory.gs2" configs/b.1/function1
 echo "function0 → $(readlink configs/b.1/function0 2>/dev/null)"
 echo "function1 → $(readlink configs/b.1/function1 2>/dev/null)"
+
+# Wait for adbd to claim FunctionFS ep0. Toybox on this device lacks
+# `fuser`, so we check `/proc/<pid>/fd/*` symlinks for any reference to
+# /dev/usb-ffs/adb/ep0. Presence of any reader = adbd is ready.
+adbd_has_ep0() {
+    ls -l /proc/*/fd/ 2>/dev/null | grep -q 'usb-ffs/adb/ep0'
+}
+i=0
+while [ "$i" -lt 50 ]; do
+    if adbd_has_ep0; then
+        echo "[wait] adbd has /dev/usb-ffs/adb/ep0 open after $((i*200))ms"
+        break
+    fi
+    # 200 ms ticks → 10 s max
+    sleep 0.2
+    i=$((i+1))
+done
+if [ "$i" -ge 50 ]; then
+    echo "[warn] adbd never opened ep0 in 10s — proceeding anyway, may flap"
+fi
 
 # ── Step 4: Set device descriptor strings ───────────────────────────────────
 # IMPORTANT: car/AA head units sniff device descriptors before deciding

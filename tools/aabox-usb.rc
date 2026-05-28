@@ -1,0 +1,26 @@
+# aabox-usb.rc — USB gadget switching + fan control for AABox.
+
+# Fan: the Rockchip pwm-fan driver uses rockchip,temp-trips to auto-control
+# the fan, but the 50°C first trip means it never spins at idle.  Switching
+# thermal zones to user_space mode stops the governor from resetting the PWM,
+# then we set a fixed duty (~63%) that keeps the SoC cool in a hot car cabin.
+on property:sys.boot_completed=1
+    write /sys/class/thermal/thermal_zone0/mode user_space
+    write /sys/class/thermal/thermal_zone1/mode user_space
+    write /sys/class/thermal/thermal_zone2/mode user_space
+    write /sys/class/thermal/thermal_zone3/mode user_space
+    write /sys/class/thermal/thermal_zone4/mode user_space
+    write /sys/class/thermal/thermal_zone5/mode user_space
+    write /sys/class/thermal/thermal_zone6/mode user_space
+    write /sys/devices/platform/pwm-fan/hwmon/hwmon8/pwm1 160
+
+# Switch to aabox FunctionFS gadget (displaces g1 from UDC).
+# Does NOT stop adbd — WiFi ADB survives.
+on property:sys.usb.config=aabox && property:sys.usb.configfs=1
+    write /config/usb_gadget/g1/UDC "none"
+    setprop sys.usb.state aabox
+
+# Restore adb mode when aabox session ends.
+on property:sys.usb.config=aabox-done && property:sys.usb.configfs=1
+    write /config/usb_gadget/aabox/UDC "none"
+    setprop sys.usb.config adb

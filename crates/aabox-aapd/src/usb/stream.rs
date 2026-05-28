@@ -66,7 +66,7 @@ use libc_consts as libc;
 
 use ::nix::libc as nix_libc;
 use std::io;
-use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
+use std::os::fd::{IntoRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
 // NOTE: deliberately NOT importing `Context` here — this file's top-level
@@ -113,20 +113,33 @@ enum IoState {
 }
 
 pub struct UsbAccessoryStream {
-    fd: Arc<FdGuard>,
+    read_fd: Arc<FdGuard>,
+    write_fd: Arc<FdGuard>,
     state: IoState,
 }
 
 impl UsbAccessoryStream {
-    /// Wrap an open accessory FD for async I/O via `spawn_blocking`. The FD
-    /// is left in blocking mode — each read/write happens on a dedicated
-    /// blocking worker thread, so blocking the syscall just parks that
-    /// worker, not the async runtime.
+    /// Wrap a single read+write FD (e.g. `/dev/usb_accessory`) for async I/O.
     pub fn new(fd: OwnedFd) -> io::Result<Self> {
         let raw = fd.into_raw_fd();
         tracing::info!(raw_fd = raw, "UsbAccessoryStream::new (spawn_blocking variant)");
+        let guard = Arc::new(FdGuard::new(raw));
         Ok(Self {
-            fd: Arc::new(FdGuard::new(raw)),
+            read_fd: Arc::clone(&guard),
+            write_fd: guard,
+            state: IoState::Idle,
+        })
+    }
+
+    /// Wrap separate bulk-OUT (read) and bulk-IN (write) FDs — used by the
+    /// FunctionFS path where ep1 and ep2 are distinct file descriptors.
+    pub fn new_split(read_fd: OwnedFd, write_fd: OwnedFd) -> io::Result<Self> {
+        let r = read_fd.into_raw_fd();
+        let w = write_fd.into_raw_fd();
+        tracing::info!(read_fd = r, write_fd = w, "UsbAccessoryStream::new_split (ffs)");
+        Ok(Self {
+            read_fd: Arc::new(FdGuard::new(r)),
+            write_fd: Arc::new(FdGuard::new(w)),
             state: IoState::Idle,
         })
     }
@@ -150,7 +163,7 @@ impl AsyncRead for UsbAccessoryStream {
                         // Nothing to do; caller asked for 0 bytes.
                         return Poll::Ready(Ok(()));
                     }
-                    let fd = Arc::clone(&this.fd);
+                    let fd = Arc::clone(&this.read_fd);
                     let handle = tokio::task::spawn_blocking(move || {
                         let mut v = vec![0u8; cap];
                         // SAFETY: read(2) with our owned FD, a mutable
@@ -211,7 +224,7 @@ impl AsyncWrite for UsbAccessoryStream {
         loop {
             match &mut this.state {
                 IoState::Idle => {
-                    let fd = Arc::clone(&this.fd);
+                    let fd = Arc::clone(&this.write_fd);
                     // Copy caller's bytes — we have to move them into the
                     // blocking worker (closure must be 'static).
                     let buf: Vec<u8> = src.to_vec();

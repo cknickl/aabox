@@ -276,23 +276,12 @@ fn usb_bringup(status: Status) -> anyhow::Result<()> {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn usb_run(status: Status, nav: NavOptions) -> anyhow::Result<()> {
     use aabox_aapd::{control, control_channel, tls, tls_tunnel, usb};
-    use aabox_aapd::usb::stream::UsbAccessoryStream;
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        status.set("usb-run: opening /dev/usb_accessory");
-        let fd = usb::wait_for_accessory().await?;
-        tracing::info!(?fd, "accessory device opened");
-
-        // Wrap the kernel FD in our AsyncFd-based `UsbAccessoryStream`. Why
-        // not `tokio::fs::File`: tokio's File calls `lseek` internally in
-        // BOTH `poll_write` (when its internal read-buffer holds unconsumed
-        // overshoot bytes from a prior read) AND `poll_flush`. `lseek` on
-        // a chardev returns ESPIPE. We hit this on every video send after
-        // the TLS handshake's large reads left overshoot bytes in tokio's
-        // File internal buffer.
-        let mut stream = UsbAccessoryStream::new(fd)
-            .map_err(|e| anyhow::anyhow!("UsbAccessoryStream::new: {e}"))?;
+        status.set("usb-run: waiting for AOA handshake via FunctionFS");
+        let mut stream = usb::wait_for_ffs_accessory().await?;
+        tracing::info!("FunctionFS bulk endpoints open — AOA handshake complete");
 
         // Step 1: AAP version handshake — but DHU `-u` mode SKIPS this.
         //

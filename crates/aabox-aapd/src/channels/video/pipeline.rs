@@ -182,28 +182,28 @@ impl VideoPipelineHandle {
             1 => 3_000_000,    // 3 Mbps for 720p
             _ => 1_500_000,    // 1.5 Mbps for 480p
         };
-        let source: Box<dyn VideoSource> =
-            match ScreenRecordVideoSource::spawn(w, h, fps, bitrate) {
-                Ok(s) => {
-                    tracing::info!(
-                        w, h, fps, bitrate,
-                        "video: spawned screenrecord as source"
-                    );
-                    Box::new(s)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "video: screenrecord spawn failed; falling back to test pattern"
-                    );
-                    let profile = if config == 0 {
-                        TestPatternProfile::P1080p30
-                    } else {
-                        TestPatternProfile::P720p30
-                    };
-                    Box::new(TestPatternVideoSource::new(profile))
-                }
-            };
+        // 2026-05-26 diagnostic: force the embedded test pattern instead of
+        // screenrecord. Screenrecord against a blank Android primary display
+        // (no Launcher, headless userdebug) produces sparse h264 — variable
+        // and low bitrate when the screen has nothing changing. The KIA
+        // Carnival 2024 ran our pipeline through VideoFocusNotification +
+        // Start but bailed after ~7 frames in ~720ms. Test pattern has
+        // continuous motion and a known-good SPS/PPS+IDR triplet at the
+        // top, plus a stable 30 fps cadence. If KIA accepts it → the bail
+        // was screenrecord output; if it still bails → deeper protocol or
+        // transport issue. Restore ScreenRecord path after diagnosis.
+        let _ = (w, h, fps, bitrate);
+        let profile = if config == 0 {
+            TestPatternProfile::P1080p30
+        } else {
+            TestPatternProfile::P720p30
+        };
+        tracing::info!(
+            ?profile,
+            config,
+            "video: using embedded test pattern (screenrecord path bypassed for diagnostic)"
+        );
+        let source: Box<dyn VideoSource> = Box::new(TestPatternVideoSource::new(profile));
 
         spawn_streamer(
             new_gen,

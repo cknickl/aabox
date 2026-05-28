@@ -50,7 +50,7 @@ netlink-sys = "0.8"
 kobject-uevent = "0.1"
 
 # POSIX bits (file flags, ioctls) — used by the USB stream layer
-nix = { version = "0.29", features = ["fs", "ioctl"] }
+nix = { version = "0.29", features = ["fs", "ioctl", "mount"] }
 
 # JSON (OSRM responses, nav destination config file)
 serde = { version = "1", features = ["derive"] }

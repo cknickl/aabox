@@ -309,6 +309,27 @@ where
         );
     }
 
+    // Step A3: SEND our ServiceDiscoveryResponse (our capabilities) proactively.
+    // KIA Carnival does not respond to our ServiceDiscoveryRequest above until
+    // it receives our capabilities first. Real Android phones send this
+    // immediately after AuthComplete without being asked.
+    {
+        let our_sdr = services::full_response();
+        let body = services::encode_response(&our_sdr);
+        let out = OutboundMessage::new(
+            ChannelId::Control as u8,
+            ControlMessageId::ServiceDiscoveryResponse as u16,
+            body,
+        );
+        send_encrypted(stream, conn, out)
+            .await
+            .context("send proactive ServiceDiscoveryResponse")?;
+        tracing::info!(
+            channel_count = our_sdr.channels.len(),
+            "control: ServiceDiscoveryResponse sent proactively (our capabilities)"
+        );
+    }
+
     // Step B: wire up the navigation pipeline.
     //
     //   nav_tx   <- runner / demo task : carries encoded-ready NavInstruction
@@ -559,7 +580,22 @@ where
             | Some(ChannelId::AvInput)
     ) {
         audio_mgr.handle(frame.channel_id, msg_id, body).await?
-    } else if matches!(chan_kind, Some(ChannelId::Video)) {
+    } else if matches!(chan_kind, Some(ChannelId::Video))
+        && frame.channel_id == video_handle.wire_channel()
+    {
+        // Only route to video::handle when frame.channel_id is the HU's
+        // ACTUAL video wire channel (set by VideoFocusNotification). The
+        // canonical `ChannelId::Video = 3` numerically collides with KIA
+        // Carnival's sensor channel (KIA assigns byte 3 = sensor). KIA's
+        // SensorStartResponse on byte 3 (msg 0x8002) was being delivered
+        // here and interpreted as MSG_STOP_INDICATION → killing the video
+        // pipeline ~1ms after every successful start. The early
+        // intercepts above already handle the legitimate video-channel
+        // messages (0x8002/0x8004/0x8008) using wire_channel(); only
+        // SETUP-state messages might land here, and only on a real video
+        // channel. wire_channel() returns ChannelId::None (255) until
+        // VideoFocusNotification arrives, so pre-focus messages all fall
+        // through to dispatch.
         video::handle(frame.channel_id, msg_id, body, video_handle)?
     } else {
         dispatch(frame.channel_id, msg_id, body, sdr_template, sensor_handler)?
@@ -727,6 +763,15 @@ fn dispatch_control(
             // pinging us until it sees opens; without them it stops at
             // "Follow instructions on your phone".
             let mut outs: Vec<OutboundMessage> = Vec::new();
+            // Setups get appended to `outs` AFTER every ChannelOpenRequest has
+            // been queued — that puts all opens on the wire first, then all
+            // setups. Matches the working Carlinkit→openauto pattern captured
+            // 2026-05-26: opens (sequential), then AudioFocusRequest, then
+            // setups. Our prior open+setup-per-channel interleaving meant KIA
+            // could see a Setup before the channel-open it acks finished
+            // processing — a candidate trigger for UNEXPECTED_MESSAGE on
+            // channel 0.
+            let mut pending_setups: Vec<OutboundMessage> = Vec::new();
             if let Ok(resp) = ServiceDiscoveryResponse::decode(body) {
                 tracing::info!(
                     channel_count = resp.channels.len(),
@@ -737,29 +782,31 @@ fn dispatch_control(
                     "control: ServiceDiscoveryResponse received from HU"
                 );
 
-                // === Proactive phone-status notifications on Control (0) ===
-                // gromaudio/android_external_aoaptest/hu_aap.c and KIA-specific
-                // anecdotal reports suggest the HU gates projection on seeing
-                // these "real phone" signals. We send them eagerly before the
-                // channel-open dance so KIA sees a fully-engaged phone.
-
-                // BatteryStatusNotification (msg_id=0x0017): required uint32
-                // battery_level = 1. Wire: `08 64` (level=100).
-                tracing::info!("control: sending BatteryStatusNotification(level=100)");
-                outs.push(OutboundMessage::new(
-                    ChannelId::Control as u8,
-                    0x0017,
-                    vec![0x08, 0x64],
-                ));
-
-                // CallAvailabilityStatus (msg_id=0x0018): optional bool
-                // call_available = 1. Wire: `08 00` (false).
-                tracing::info!("control: sending CallAvailabilityStatus(false)");
-                outs.push(OutboundMessage::new(
-                    ChannelId::Control as u8,
-                    0x0018,
-                    vec![0x08, 0x00],
-                ));
+                // === Proactive phone-status notifications DISABLED ===
+                // 2026-05-26 KIA Carnival test: sending BatteryStatusNotification
+                // (0x0017) and CallAvailabilityStatus (0x0018) on the control
+                // channel immediately after ServiceDiscoveryResponse caused KIA
+                // to respond UNEXPECTED_MESSAGE on channel=0, then disconnect
+                // USB ~400ms later. KIA processed all our ChannelOpenRequests
+                // (status=0) but the unsolicited status notifications before
+                // any channel is open broke the protocol state machine.
+                //
+                // If we need these later, send them AFTER all ChannelOpenResponse
+                // status=0 messages arrive, and possibly on the audio_media
+                // (battery is sometimes scoped to telephony) or media channel.
+                //
+                // tracing::info!("control: sending BatteryStatusNotification(level=100)");
+                // outs.push(OutboundMessage::new(
+                //     ChannelId::Control as u8,
+                //     0x0017,
+                //     vec![0x08, 0x64],
+                // ));
+                // tracing::info!("control: sending CallAvailabilityStatus(false)");
+                // outs.push(OutboundMessage::new(
+                //     ChannelId::Control as u8,
+                //     0x0018,
+                //     vec![0x08, 0x00],
+                // ));
                 for ch in &resp.channels {
                     let kind = classify_channel(ch);
                     // Dump per-channel descriptor body so we can spot which
@@ -860,20 +907,30 @@ fn dispatch_control(
                             ControlMessageId::ChannelOpenRequest as u16,
                             body,
                         ));
-                        // Queue the per-service Setup right after the open.
-                        // KIA processes both within ~5ms — by the time it sees
-                        // the Setup the channel-open ack has already been
-                        // generated, so the setup lands on an "open" channel.
+                        // Stash the per-service Setup — it gets appended to
+                        // `outs` AFTER the open-pass loop finishes, so the
+                        // wire order is opens(*) then setups(*).
                         if let Some(setup) = setup_message_for(ch.channel_id, kind) {
                             tracing::info!(
                                 channel_id = ch.channel_id,
                                 kind = kind,
                                 msg_id = format!("0x{:04x}", setup.message_id),
-                                "control: sending per-service Setup"
+                                "control: deferring per-service Setup (will send after all opens)"
                             );
-                            outs.push(setup);
+                            pending_setups.push(setup);
                         }
                     }
+                }
+
+                // Append all deferred setups AFTER the open-pass. Wire order:
+                // ChannelOpenRequest(1), ..., ChannelOpenRequest(N),
+                // Setup(1), ..., Setup(N).
+                if !pending_setups.is_empty() {
+                    tracing::info!(
+                        count = pending_setups.len(),
+                        "control: appending deferred Setup messages (post-opens)"
+                    );
+                    outs.extend(pending_setups);
                 }
 
                 // === AudioFocusRequest on Control (REMOVED 2026-05-24) ===
@@ -926,17 +983,20 @@ fn dispatch_control(
             Ok(vec![])
         }
         Ok(ControlMessageId::ServiceDiscoveryRequest) => {
-            // Defensive: not expected in source role, but log it so we know.
-            // Modern proto: device_brand was removed; use label_text + device_name.
+            // HU is asking for our capabilities. Respond with our template.
             if let Ok(req) = ServiceDiscoveryRequest::decode(body) {
-                tracing::warn!(
+                tracing::info!(
                     label_text = %req.label_text,
                     device_name = %req.device_name,
-                    "control: unexpected ServiceDiscoveryRequest from HU (we're source); ignoring"
+                    "control: ServiceDiscoveryRequest from HU — responding with our capabilities"
                 );
             }
-            let _unused = sdr_template;
-            Ok(vec![])
+            let body = services::encode_response(sdr_template);
+            Ok(vec![OutboundMessage::new(
+                ChannelId::Control as u8,
+                ControlMessageId::ServiceDiscoveryResponse as u16,
+                body,
+            )])
         }
         Ok(ControlMessageId::PingRequest) => {
             let req = PingRequest::decode(body)

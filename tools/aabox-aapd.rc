@@ -1,56 +1,17 @@
-# Android init service definitions for AABox.
-# Goes to /system/etc/init/aabox-aapd.rc.
+# Android init service for AABox — Android 12 (Radxa Rock 5B+) variant.
+# Goes to /vendor/etc/init/aabox-aapd.rc.
 #
-# Two services:
-#   1. aabox_usb_bind — oneshot at boot: swaps the gadget function from
-#      ffs.adb to accessory.gs2 and binds /config/usb_gadget/g1 to the
-#      OTG UDC. Without this the carrier USB-C looks dead to anything
-#      plugged in (see project-cm5-usb-gadget memory for the why).
-#   2. aabox_aapd — long-running: watchdog around the daemon's usb-run
-#      loop. Restarts if the daemon ever exits.
+# For the AOSP 14 / CM5 variant see the aosp14 branch; that version uses
+# aabox-usb-bind.sh + a watchdog wrapper instead of the direct daemon call.
+#
+# USB gadget switching and fan control live in aabox-usb.rc (same dir).
 
-service aabox_usb_bind /system/bin/aabox-usb-bind.sh
-    class late_start
-    user root
-    group root
-    seclabel u:r:su:s0
-    oneshot
-    disabled
-
-service aabox_aapd /system/bin/aabox-aapd-watchdog.sh
+service aabox_aapd /system/bin/aabox-aapd usb-run
     class main
     user root
     group root
+    restart_period 5
     seclabel u:r:su:s0
 
-# Trigger the bind after the framework is fully up: the vendor USB HAL
-# (vendor.usb_gadget-rpi) runs during early boot and re-creates the default
-# adb config, blowing away anything we set earlier. Waiting for
-# sys.boot_completed=1 means system_server + UsbDeviceManager + HAL have
-# all finished their initial setCurrentUsbFunctions("adb") call, so our
-# overwrite is the one that sticks.
-on property:sys.boot_completed=1
-    start aabox_usb_bind
-    write /proc/sys/kernel/printk "3 4 1 7"
-
-# Re-run the bind whenever Android's USB stack changes sys.usb.state. The
-# init.usb.configfs.rc actions (on property:sys.usb.config=...) bounce the
-# gadget on every plug/unplug — they wipe function symlinks and re-create
-# them in Android's chosen layout (e.g. f1=ffs.adb), then write the
-# default Rockchip idVendor=0x2207 back. Our bind script runs after, force-
-# rewriting back to function0=ffs.adb + function1=accessory.gs2 with
-# idVendor=0x18d1 / idProduct=0x4ee2. The bind script's "rm + ln -s" pattern
-# is idempotent so spurious fires here are harmless.
-on property:sys.usb.state=*
-    start aabox_usb_bind
-
-# Static unauthenticated ADB-over-TCP on port 5555 so a headless CM5 is
-# reachable without dragging out a monitor to read the rotating Wireless
-# Debugging port. Modern TLS Wireless Debugging still runs in parallel.
-# Trade-off: anyone on the same LAN gets a root shell — fine for the car
-# Wi-Fi / phone hotspot scenario, NOT for public Wi-Fi.
-on property:persist.adb.tcp.port=*
-    setprop service.adb.tcp.port ${persist.adb.tcp.port}
-
 on boot
-    start aabox_aapd
+    write /proc/sys/kernel/printk "3 4 1 7"

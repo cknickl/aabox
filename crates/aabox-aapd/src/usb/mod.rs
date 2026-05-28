@@ -33,15 +33,28 @@
 
 #![cfg(any(target_os = "linux", target_os = "android"))]
 
+pub mod ffs;
 pub mod gadget;
 pub mod stream;
 pub mod uevent;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
+
+/// FunctionFS path: create the `aabox` configfs gadget, mount functionfs,
+/// and block in a `spawn_blocking` task until the head unit completes the
+/// AOAv2 handshake (GET_PROTOCOL → SEND_STRING* → ACCESSORY_START). Returns
+/// an async stream backed by the two bulk endpoints — no USB reset occurs.
+pub async fn wait_for_ffs_accessory() -> Result<stream::UsbAccessoryStream> {
+    let endpoints = tokio::task::spawn_blocking(ffs::setup_and_wait)
+        .await
+        .context("ffs setup task panicked")??;
+    stream::UsbAccessoryStream::new_split(endpoints.ep_out, endpoints.ep_in)
+        .map_err(|e| anyhow::anyhow!("UsbAccessoryStream::new_split: {e}"))
+}
 
 /// Android path: open the kernel-managed `/dev/usb_accessory` and return its
 /// fd. The open succeeds before accessory mode is active; reads on the fd
