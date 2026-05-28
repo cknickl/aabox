@@ -3,7 +3,10 @@
 # Fan: the Rockchip pwm-fan driver uses rockchip,temp-trips to auto-control
 # the fan, but the 50°C first trip means it never spins at idle.  Switching
 # thermal zones to user_space mode stops the governor from resetting the PWM,
-# then we set a fixed duty (~63%) that keeps the SoC cool in a hot car cabin.
+# then we run the fan at 100% (255) always.  This motor takes 10-30s to spin
+# up from cold at 100% duty — that's normal for this BLDC; it will be running
+# well before the car connects.  TODO: tune to a lower steady-state duty once
+# we have temp vs. noise data from in-car use (see memory: project-fan-todo).
 on property:sys.boot_completed=1
     write /sys/class/thermal/thermal_zone0/mode user_space
     write /sys/class/thermal/thermal_zone1/mode user_space
@@ -12,7 +15,7 @@ on property:sys.boot_completed=1
     write /sys/class/thermal/thermal_zone4/mode user_space
     write /sys/class/thermal/thermal_zone5/mode user_space
     write /sys/class/thermal/thermal_zone6/mode user_space
-    write /sys/devices/platform/pwm-fan/hwmon/hwmon8/pwm1 160
+    write /sys/devices/platform/pwm-fan/hwmon/hwmon8/pwm1 255
 
 # Switch to aabox FunctionFS gadget (displaces g1 from UDC).
 # Does NOT stop adbd — WiFi ADB survives.
