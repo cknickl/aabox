@@ -123,12 +123,17 @@ where
     S: tokio::io::AsyncWrite + Unpin,
 {
     let bytes = frame.encode();
-    tracing::debug!(
-        n = bytes.len(),
-        wire = %hex_dump(&bytes),
-        "TX frame wire bytes"
-    );
+    let n = bytes.len();
+    // Don't hex-dump huge buffers — for 7973-byte video fragments the
+    // formatted string is ~24KB and may be obscuring downstream behavior.
+    if n <= 256 {
+        tracing::debug!(n, wire = %hex_dump(&bytes), "TX frame wire bytes");
+    } else {
+        tracing::info!(n, head = %hex_dump(&bytes[..32]), "TX frame wire bytes (head only)");
+    }
+    tracing::info!(n, "TX write_all entering");
     stream.write_all(&bytes).await.context("write frame")?;
+    tracing::info!(n, "TX write_all returned OK");
     // DELIBERATELY NOT calling `stream.flush().await` here. When `stream` is
     // a `tokio::fs::File` wrapping `/dev/usb_accessory`, `poll_flush` calls
     // `lseek` internally to discard read-buffer overshoot — which returns

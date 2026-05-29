@@ -105,17 +105,21 @@ impl Drop for FdGuard {
     }
 }
 
-/// State of an in-flight blocking I/O operation.
-enum IoState {
-    Idle,
-    Reading(JoinHandle<io::Result<(Vec<u8>, usize)>>),
-    Writing(JoinHandle<io::Result<usize>>),
-}
-
+/// In-flight blocking I/O slots. We keep read and write SEPARATE — sharing one
+/// IoState caused a poisoned-state deadlock: when `tokio::select!` cancelled a
+/// pending `read_frame` future, the stream was left in `IoState::Reading(handle)`,
+/// and a subsequent `poll_write` returned Poll::Pending without registering a
+/// waker (the old code had `IoState::Reading(_) => return Poll::Pending` in
+/// poll_write) — so writes parked forever. With separate read/write slots, a
+/// dropped read JoinHandle becomes garbage we collect on the next poll_read,
+/// and writes always have an independent slot to use. Reads and writes on
+/// /dev/usb_accessory use separate bulk endpoints (IN vs OUT) so concurrency
+/// at the kernel level is safe.
 pub struct UsbAccessoryStream {
     read_fd: Arc<FdGuard>,
     write_fd: Arc<FdGuard>,
-    state: IoState,
+    read_state: Option<JoinHandle<io::Result<(Vec<u8>, usize)>>>,
+    write_state: Option<JoinHandle<io::Result<usize>>>,
 }
 
 impl UsbAccessoryStream {
@@ -127,7 +131,8 @@ impl UsbAccessoryStream {
         Ok(Self {
             read_fd: Arc::clone(&guard),
             write_fd: guard,
-            state: IoState::Idle,
+            read_state: None,
+            write_state: None,
         })
     }
 
@@ -140,7 +145,8 @@ impl UsbAccessoryStream {
         Ok(Self {
             read_fd: Arc::new(FdGuard::new(r)),
             write_fd: Arc::new(FdGuard::new(w)),
-            state: IoState::Idle,
+            read_state: None,
+            write_state: None,
         })
     }
 }
@@ -152,63 +158,45 @@ impl AsyncRead for UsbAccessoryStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        loop {
-            match &mut this.state {
-                IoState::Idle => {
-                    // Kick off a blocking read. We allocate a fresh Vec
-                    // sized to the caller's unfilled capacity — the
-                    // blocking worker fills it and returns it back.
-                    let cap = buf.remaining();
-                    if cap == 0 {
-                        // Nothing to do; caller asked for 0 bytes.
-                        return Poll::Ready(Ok(()));
+        // Acquire (or take ownership of) the in-flight read JoinHandle.
+        let mut handle = match this.read_state.take() {
+            Some(h) => h,
+            None => {
+                // No outstanding read — start a fresh one.
+                let cap = buf.remaining();
+                if cap == 0 {
+                    return Poll::Ready(Ok(()));
+                }
+                let fd = Arc::clone(&this.read_fd);
+                tokio::task::spawn_blocking(move || {
+                    let mut v = vec![0u8; cap];
+                    // SAFETY: read(2) with our owned FD, a mutable buffer
+                    // pointer we just allocated, and length. Returns -1
+                    // on error or 0..=len on success.
+                    let n = unsafe {
+                        nix_libc::read(fd.as_raw(), v.as_mut_ptr() as *mut _, v.len())
+                    };
+                    if n < 0 {
+                        return Err(io::Error::last_os_error());
                     }
-                    let fd = Arc::clone(&this.read_fd);
-                    let handle = tokio::task::spawn_blocking(move || {
-                        let mut v = vec![0u8; cap];
-                        // SAFETY: read(2) with our owned FD, a mutable
-                        // buffer pointer we just allocated, and length.
-                        // Returns -1 on error or 0..=len on success.
-                        let n = unsafe {
-                            nix_libc::read(fd.as_raw(), v.as_mut_ptr() as *mut _, v.len())
-                        };
-                        if n < 0 {
-                            return Err(io::Error::last_os_error());
-                        }
-                        Ok((v, n as usize))
-                    });
-                    this.state = IoState::Reading(handle);
-                    // Fall through to the Reading arm below.
-                }
-                IoState::Reading(handle) => {
-                    match Pin::new(handle).poll(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(join_err)) => {
-                            // Blocking worker panicked or was cancelled.
-                            this.state = IoState::Idle;
-                            return Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!("read blocking task: {join_err}"),
-                            )));
-                        }
-                        Poll::Ready(Ok(Err(e))) => {
-                            this.state = IoState::Idle;
-                            return Poll::Ready(Err(e));
-                        }
-                        Poll::Ready(Ok(Ok((data, n)))) => {
-                            this.state = IoState::Idle;
-                            buf.put_slice(&data[..n]);
-                            return Poll::Ready(Ok(()));
-                        }
-                    }
-                }
-                IoState::Writing(_) => {
-                    // poll_read called while a write is in flight — that
-                    // shouldn't happen in our usage (single task owns the
-                    // stream) but be safe: return Pending and let the
-                    // write complete first.
-                    return Poll::Pending;
-                }
+                    Ok((v, n as usize))
+                })
+            }
+        };
+        match Pin::new(&mut handle).poll(cx) {
+            Poll::Pending => {
+                // Put the handle back so the NEXT poll_read polls it again.
+                this.read_state = Some(handle);
+                Poll::Pending
+            }
+            Poll::Ready(Err(join_err)) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("read blocking task: {join_err}"),
+            ))),
+            Poll::Ready(Ok(Err(e))) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(Ok((data, n)))) => {
+                buf.put_slice(&data[..n]);
+                Poll::Ready(Ok(()))
             }
         }
     }
@@ -221,53 +209,56 @@ impl AsyncWrite for UsbAccessoryStream {
         src: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        loop {
-            match &mut this.state {
-                IoState::Idle => {
-                    let fd = Arc::clone(&this.write_fd);
-                    // Copy caller's bytes — we have to move them into the
-                    // blocking worker (closure must be 'static).
-                    let buf: Vec<u8> = src.to_vec();
-                    let handle = tokio::task::spawn_blocking(move || {
-                        // SAFETY: write(2) with our owned FD, a buffer
-                        // pointer, and length. Returns -1 on error or
-                        // bytes-written on success. Partial writes are
-                        // legal under POSIX; the caller handles that via
-                        // `write_all`.
-                        let n = unsafe {
-                            nix_libc::write(fd.as_raw(), buf.as_ptr() as *const _, buf.len())
-                        };
-                        if n < 0 {
-                            Err(io::Error::last_os_error())
-                        } else {
-                            Ok(n as usize)
-                        }
-                    });
-                    this.state = IoState::Writing(handle);
-                }
-                IoState::Writing(handle) => {
-                    match Pin::new(handle).poll(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(join_err)) => {
-                            this.state = IoState::Idle;
-                            return Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!("write blocking task: {join_err}"),
-                            )));
-                        }
-                        Poll::Ready(Ok(Err(e))) => {
-                            this.state = IoState::Idle;
-                            return Poll::Ready(Err(e));
-                        }
-                        Poll::Ready(Ok(Ok(n))) => {
-                            this.state = IoState::Idle;
-                            return Poll::Ready(Ok(n));
-                        }
+        let n_req = src.len();
+        // Acquire (or take ownership of) the in-flight write JoinHandle.
+        let mut handle = match this.write_state.take() {
+            Some(h) => h,
+            None => {
+                tracing::info!(n_req, "poll_write: no in-flight write → spawning blocking write");
+                let fd = Arc::clone(&this.write_fd);
+                // Copy caller's bytes — we have to move them into the
+                // blocking worker (closure must be 'static).
+                let buf: Vec<u8> = src.to_vec();
+                let buf_len = buf.len();
+                tokio::task::spawn_blocking(move || {
+                    tracing::info!(buf_len, "blocking write: entering write(2)");
+                    // SAFETY: write(2) with our owned FD, a buffer
+                    // pointer, and length. Returns -1 on error or
+                    // bytes-written on success. Partial writes are
+                    // legal under POSIX; the caller handles that via
+                    // `write_all`.
+                    let n = unsafe {
+                        nix_libc::write(fd.as_raw(), buf.as_ptr() as *const _, buf.len())
+                    };
+                    tracing::info!(buf_len, n, "blocking write: write(2) returned");
+                    if n < 0 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(n as usize)
                     }
-                }
-                IoState::Reading(_) => {
-                    return Poll::Pending;
-                }
+                })
+            }
+        };
+        match Pin::new(&mut handle).poll(cx) {
+            Poll::Pending => {
+                tracing::trace!(n_req, "poll_write: still Pending");
+                this.write_state = Some(handle);
+                Poll::Pending
+            }
+            Poll::Ready(Err(join_err)) => {
+                tracing::warn!(n_req, %join_err, "poll_write: blocking task join error");
+                Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("write blocking task: {join_err}"),
+                )))
+            }
+            Poll::Ready(Ok(Err(e))) => {
+                tracing::warn!(n_req, %e, "poll_write: write(2) returned error");
+                Poll::Ready(Err(e))
+            }
+            Poll::Ready(Ok(Ok(n))) => {
+                tracing::info!(n_req, n, "poll_write: write(2) ok");
+                Poll::Ready(Ok(n))
             }
         }
     }

@@ -281,6 +281,19 @@ where
     //                              to match our USB descriptor)
     //   phone_info  = { instance_id, connectivity_lifetime_id }
     {
+        // 2026-05-29 research-grounded: matches master protos.proto:20-26 from
+        // the real Google AA binary. Modern KIA 2024+ validates SDR-Request
+        // against this schema and HARD-DISCONNECTS USB ~1s later if any field
+        // is missing/wrong (per Google HUIG v1.3, the HU "SHOULD reset the USB
+        // connection" on malformed SDR-Request — and that matches exactly the
+        // failure mode we observed on 2026-05-29).
+        //
+        // Required fields per modern schema:
+        //   label_text  (field 4, string) — UI label  -> "Auto"
+        //   device_name (field 5, string) — device id -> "Pixel 6" (matches USB descriptor)
+        //   phone_info  (field 6, PhoneInfo submessage) — required for modern KIA
+        //     - instance_id (field 1)             — stable per-device id
+        //     - connectivity_lifetime_id (field 2)— per-pairing-session id
         let sdr = ServiceDiscoveryRequest {
             small_icon: Vec::new(),
             medium_icon: Vec::new(),
@@ -294,6 +307,11 @@ where
         };
         let mut buf = Vec::with_capacity(sdr.encoded_len());
         sdr.encode(&mut buf).expect("encode SDR");
+        tracing::info!(
+            body_len = buf.len(),
+            body_hex = %buf.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""),
+            "control: outgoing SDR-Request body bytes (encoded protobuf)"
+        );
         let out = OutboundMessage::new(
             ChannelId::Control as u8,
             ControlMessageId::ServiceDiscoveryRequest as u16,
@@ -321,24 +339,14 @@ where
     // If KIA stalls without us sending the response, the right fix is to
     // examine our `services::encode_response()` payload byte-by-byte against
     // a real-phone capture, not to send it proactively.
-    /*
-    {
-        let our_sdr = services::full_response();
-        let body = services::encode_response(&our_sdr);
-        let out = OutboundMessage::new(
-            ChannelId::Control as u8,
-            ControlMessageId::ServiceDiscoveryResponse as u16,
-            body,
-        );
-        send_encrypted(stream, conn, out)
-            .await
-            .context("send proactive ServiceDiscoveryResponse")?;
-        tracing::info!(
-            channel_count = our_sdr.channels.len(),
-            "control: ServiceDiscoveryResponse sent proactively (our capabilities)"
-        );
-    }
-    */
+    // 2026-05-29 research-grounded: do NOT send a proactive SDR-Response.
+    // Per the HU implementations we surveyed (aacs/AAClient handles inbound
+    // SDR-Request and replies with Response; openautolink/jni_session.cpp
+    // does the same), the HU is the only side that sends SDR-Response. The
+    // source-role only sends SDR-Request (the body of which carries our
+    // phone identity) and then waits for the HU's Response in the dispatch
+    // loop below. Earlier proactive sends triggered UNEXPECTED_MESSAGE on
+    // channel 0 from KIA.
 
     // Step B: wire up the navigation pipeline.
     //
@@ -541,12 +549,18 @@ where
     //      task starts pushing test-pattern frames onto outbound_tx
     // The `dispatch` cross-channel intercept also returns the wire-format
     // Start{session=1, config=0} message we need to send to the HU.
-    if msg_id == 0x8008 {
+    // VideoFocusNotification (0x8008): record wire channel now, but DEFER
+    // pipeline.start() until AFTER we've sent Start AND given KIA ~150ms to
+    // ready its decoder. Earlier code kicked the streamer immediately, which
+    // caused the first H.264 fragment to land on the wire <1ms after the Start
+    // message — KIA had no time to set up its decoder and silently closed the
+    // bulk endpoint right after our first 7973-byte fragment.
+    let saw_video_focus_notification = msg_id == 0x8008;
+    if saw_video_focus_notification {
         video_handle.set_wire_channel(frame.channel_id);
-        video_handle.start(1, 0);
         tracing::info!(
             channel = frame.channel_id,
-            "video: pipeline kicked on wire channel"
+            "video: wire channel recorded — pipeline start DEFERRED until after Start + decoder setup delay"
         );
     }
     // AV_MEDIA_ACK_INDICATION (msg 0x8004) — HU acks one of our streamed
@@ -612,6 +626,19 @@ where
     };
     for out in outs {
         send_encrypted(stream, conn, out).await?;
+    }
+    // Deferred pipeline kick: now that Start has been written, sleep so KIA's
+    // decoder can spin up, THEN start the streamer task. 150ms is empirically
+    // what other AAP source implementations (aacs, openauto-android-receiver)
+    // wait between Start and first MEDIA_DATA fragment.
+    if saw_video_focus_notification {
+        tracing::info!("video: post-Start delay (150ms) before pipeline kick");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        video_handle.start(1, 0);
+        tracing::info!(
+            channel = video_handle.wire_channel(),
+            "video: pipeline kicked AFTER Start + 150ms delay"
+        );
     }
     Ok(())
 }

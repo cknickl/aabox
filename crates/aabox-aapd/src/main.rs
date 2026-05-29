@@ -67,6 +67,22 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let _guards = install_tracing(&args.log_file);
 
+    // Panic hook: route every panic through tracing so it lands in the
+    // log file. Daemon stdout/stderr go to /dev/null under init, so without
+    // this any panic message vanishes.
+    std::panic::set_hook(Box::new(|info| {
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string payload>".to_string()
+        };
+        tracing::error!(location = %location, panic = %payload, "PANIC");
+    }));
+
     tracing::info!(version = aabox_aapd::version(), "aabox-aapd starting");
 
     // Force system clock into the live Carlinkit Client.crt validity window.
