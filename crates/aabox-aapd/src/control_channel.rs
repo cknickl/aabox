@@ -309,10 +309,19 @@ where
         );
     }
 
-    // Step A3: SEND our ServiceDiscoveryResponse (our capabilities) proactively.
-    // KIA Carnival does not respond to our ServiceDiscoveryRequest above until
-    // it receives our capabilities first. Real Android phones send this
-    // immediately after AuthComplete without being asked.
+    // 2026-05-29: Disabled proactive ServiceDiscoveryResponse.
+    // Reason: this proactive send (added 2026-05-28 in 19cf7ab to work around
+    // a perceived KIA hang on SDR-Request) triggers UNEXPECTED_MESSAGE on
+    // channel 0 from KIA, which then refuses to open service channels and
+    // never advances past "Reading USB device". The May 22 baseline did NOT
+    // send this and got AA UI to appear. Restoring the May 22 behavior: just
+    // send SDR-Request and wait for KIA's own SDR-Response (received in the
+    // dispatch loop below).
+    //
+    // If KIA stalls without us sending the response, the right fix is to
+    // examine our `services::encode_response()` payload byte-by-byte against
+    // a real-phone capture, not to send it proactively.
+    /*
     {
         let our_sdr = services::full_response();
         let body = services::encode_response(&our_sdr);
@@ -329,6 +338,7 @@ where
             "control: ServiceDiscoveryResponse sent proactively (our capabilities)"
         );
     }
+    */
 
     // Step B: wire up the navigation pipeline.
     //
@@ -772,6 +782,13 @@ fn dispatch_control(
             // processing — a candidate trigger for UNEXPECTED_MESSAGE on
             // channel 0.
             let mut pending_setups: Vec<OutboundMessage> = Vec::new();
+            // Channels classified as "video" — we'll send VideoFocusRequest
+            // for each AFTER all Setups. KIA waits for VideoFocusRequest
+            // before sending VideoFocusNotification + before opening the AA
+            // UI. 2026-05-29 finding: previously the daemon never sent this,
+            // so KIA always timed out at "Reading USB device" ~1s after
+            // AVChannelSetupResponse.
+            let mut video_channels: Vec<u8> = Vec::new();
             if let Ok(resp) = ServiceDiscoveryResponse::decode(body) {
                 tracing::info!(
                     channel_count = resp.channels.len(),
@@ -868,6 +885,9 @@ fn dispatch_control(
                         }
                     }
                     if should_open(kind) {
+                        if kind == "video" {
+                            video_channels.push(ch.channel_id as u8);
+                        }
                         tracing::info!(
                             channel_id = ch.channel_id,
                             kind = kind,
@@ -931,6 +951,32 @@ fn dispatch_control(
                         "control: appending deferred Setup messages (post-opens)"
                     );
                     outs.extend(pending_setups);
+                }
+
+                // VideoFocusRequest for each video channel AFTER all setups.
+                //
+                // Format per aasdk_proto/VideoFocusRequestMessage.proto:
+                //   message VideoFocusRequest {
+                //     int32 disp_index   = 1;   // = 0
+                //     VideoFocusMode  mode  = 2;   // FOCUSED = 1
+                //     VideoFocusReason r = 3;    // UNK_1 = 1
+                //   }
+                //
+                // msg_id = 0x8007 (VIDEO_FOCUS_REQUEST). Without this, KIA
+                // never sends VideoFocusNotification (0x8008), so the daemon
+                // never gets the wire_channel + Start trigger, and KIA times
+                // out at "Reading USB device" ~1s after AVChannelSetupResponse.
+                for &vch in &video_channels {
+                    let body: Vec<u8> = vec![
+                        0x08, 0x00, // disp_index = 0
+                        0x10, 0x01, // mode = FOCUSED (1)
+                        0x18, 0x01, // reason = UNK_1 (1)
+                    ];
+                    tracing::info!(
+                        channel_id = vch,
+                        "control: sending VideoFocusRequest (disp=0 mode=FOCUSED reason=UNK_1)"
+                    );
+                    outs.push(OutboundMessage::new(vch, 0x8007, body));
                 }
 
                 // === AudioFocusRequest on Control (REMOVED 2026-05-24) ===
